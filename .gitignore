@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+# دادهٔ حساس — هرگز کامیت نشود
+res.xlsx
+*.xlsx
+*.DBF
+*.dbf
+cal_codes.csv
+config.json
+*.key
+isaco_secrets.local.json

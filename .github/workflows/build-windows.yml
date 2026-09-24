@@ -1,0 +1,58 @@
+name: ساخت نسخهٔ ویندوز
+
+# با هر push روی main و همچنین دستی از تب Actions اجرا می‌شود.
+# خروجی: فایل اجرایی (exe) و فایل نصبی، به‌صورت Artifact قابل دانلود.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: دریافت کد
+        uses: actions/checkout@v4
+
+      - name: نصب پایتون ۳.۱۲
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: نصب وابستگی‌ها
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pyinstaller pytest
+
+      - name: اجرای تست‌ها
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q
+
+      - name: ساخت فایل اجرایی با PyInstaller
+        run: pyinstaller packaging/nabz.spec
+
+      - name: نصب Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: ساخت فایل نصبی
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss
+
+      - name: آپلود فایل اجرایی (پوشهٔ کامل)
+        uses: actions/upload-artifact@v4
+        with:
+          name: TexayadakNabz-exe
+          path: dist/TexayadakNabz/
+
+      - name: آپلود فایل نصبی
+        uses: actions/upload-artifact@v4
+        with:
+          name: TexayadakNabz-Setup
+          path: packaging/Output/*.exe
+          if-no-files-found: warn

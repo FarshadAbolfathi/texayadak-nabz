@@ -1,0 +1,109 @@
+"""تست اجرای سینک بدون رابط (auto sync)."""
+
+from decimal import Decimal
+
+import pytest
+
+from nabz.config import CredentialStore, MemoryBackend, WooCredentials
+from nabz.db import Database
+from nabz.jobs import run_auto_sync
+from nabz.targets.woocommerce import BatchOutcome, WooClient, WooProduct
+from tests.conftest import write_dbf, CAL_FIELDS
+
+
+class FakeWoo(WooClient):
+    def __init__(self, products):
+        self._products = products
+        self.updates = []
+
+    def fetch_products(self, status="any"):
+        return self._products
+
+    def batch_update(self, updates):
+        self.updates = updates
+        out = BatchOutcome()
+        out.updated = [u["id"] for u in updates]
+        return out
+
+
+def woo_product(pid, sku, price="", stock=3):
+    return WooProduct(id=pid, name=f"م{pid}", sku=sku, regular_price=price,
+                      stock_quantity=stock, stock_status="instock",
+                      manage_stock=True, type="simple", status="publish")
+
+
+@pytest.fixture
+def db():
+    d = Database(":memory:")
+    d.set_setting("markup_percent", 15)
+    d.set_setting("max_change_percent", 0)
+    d.set_setting("max_on_site", 2)
+    yield d
+    d.close()
+
+
+@pytest.fixture
+def store():
+    s = CredentialStore(backend=MemoryBackend())
+    s.save_woo(WooCredentials(base_url="https://x.com",
+                              consumer_key="ck", consumer_secret="cs"))
+    return s
+
+
+def make_isaco_xlsx(path):
+    from openpyxl import Workbook
+    from nabz.sources.isaco_excel import EXPECTED_HEADERS
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "لیست قیمت"
+    ws.append(list(EXPECTED_HEADERS))
+    # 1200 ردیف برای عبور از محافظ حجم
+    for i in range(1200):
+        code = f"{5010269900 + i:010d}"
+        ws.append([code, "کالا", "پژو", "عدد", 1, 56000000, 68992000, 50000000])
+    wb.save(path)
+    return path
+
+
+class TestNoSources:
+    def test_no_source_configured(self, db, store):
+        result = run_auto_sync(db, store, woo=FakeWoo([]))
+        assert not result.ok
+        assert "منبعی" in result.message
+
+
+class TestPriceSync:
+    def test_price_sync_from_isaco(self, db, store, tmp_path):
+        path = make_isaco_xlsx(tmp_path / "p.xlsx")
+        db.set_setting("isaco_excel_path", str(path))
+        db.set_setting("schedule_stock", False)
+
+        woo = FakeWoo([woo_product(1, "5010269900", price="1000000")])
+        result = run_auto_sync(db, store, woo=woo)
+        assert result.ok
+        assert result.apply_result.applied_count == 1
+        # قیمت جدید: 68,992,000 ÷ 10 × 1.15 = 7,934,080 → رند 1000 = 7,934,000
+        assert woo.updates[0]["regular_price"] == "7934000"
+
+
+class TestStockSync:
+    def test_stock_sync_from_haseb(self, db, store, tmp_path):
+        rows = [{"COD": "5010269900", "NAME": "کالا", "COD_ANB": "1",
+                 "NAME_ANB": "ا", "MOJ": "50.00000", "GH_FO": "0"}]
+        cal = write_dbf(tmp_path / "cal.DBF", CAL_FIELDS, rows)
+        db.set_setting("haseb_cal_path", str(cal))
+        db.set_setting("schedule_price", False)
+
+        woo = FakeWoo([woo_product(1, "5010269900", stock=10)])
+        result = run_auto_sync(db, store, woo=woo)
+        assert result.ok
+        # سقف موجودی ۲ اعمال می‌شود
+        assert woo.updates[0]["stock_quantity"] == 2
+
+
+class TestNoWoo:
+    def test_missing_woo_credentials(self, db):
+        empty_store = CredentialStore(backend=MemoryBackend())
+        result = run_auto_sync(db, empty_store)
+        assert not result.ok
+        assert "ووکامرس" in result.message
