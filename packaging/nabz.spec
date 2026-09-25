@@ -10,6 +10,14 @@
 
 import os
 
+# PyInstaller مسیرهای نسبی در spec را نسبت به پوشهٔ خود spec می‌سنجد.
+# با SPECPATH (پوشهٔ این فایل = packaging) مسیر مطلق ریشهٔ مخزن را می‌سازیم
+# تا صرف‌نظر از پوشهٔ اجرا، فایل ورودی درست پیدا شود.
+ROOT = os.path.dirname(SPECPATH)
+ENTRY_SCRIPT = os.path.join(ROOT, "run_app.py")
+SRC_PATH = os.path.join(ROOT, "src")
+ICON_PATH = os.path.join(SPECPATH, "icon.ico")
+
 block_cipher = None
 
 # ماژول‌هایی که PyInstaller ممکن است خودکار پیدا نکند
@@ -26,8 +34,8 @@ hidden = [
 ]
 
 a = Analysis(
-    ["run_app.py"],
-    pathex=["src"],
+    [ENTRY_SCRIPT],
+    pathex=[SRC_PATH],
     binaries=[],
     datas=[],
     hiddenimports=hidden,
@@ -53,7 +61,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,          # بدون پنجرهٔ کنسول
-    icon="icon.ico" if os.path.exists("packaging/icon.ico") else None,
+    icon=ICON_PATH if os.path.exists(ICON_PATH) else None,
 )
 
 coll = COLLECT(
