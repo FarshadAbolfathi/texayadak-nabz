@@ -1,15 +1,13 @@
-"""تب تنظیمات — قواعد قیمت، موجودی، و اعتبارنامه‌ها."""
+"""تب تنظیمات — قواعد قیمت، موجودی، اعتبارنامه‌ها و مسیر منابع."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
@@ -24,12 +22,10 @@ from ...config import (
     WooCredentials,
 )
 from ...db import Database
-from ..widgets import Card, muted
+from ..widgets import Card, field, inline_field, muted, scrollable
 
 
 class SettingsTab(QWidget):
-    """تنظیمات را از دیتابیس/کیف‌کلید می‌خواند و ذخیره می‌کند."""
-
     settings_changed = Signal()
 
     def __init__(self, db: Database, store: CredentialStore, parent=None):
@@ -40,60 +36,55 @@ class SettingsTab(QWidget):
         self._load()
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(22, 22, 22, 22)
         layout.setSpacing(16)
 
         # --- قواعد قیمت ---
         price_card = Card("قواعد قیمت‌گذاری")
-        form = QFormLayout()
-        form.setSpacing(12)
 
         self.markup = QDoubleSpinBox()
         self.markup.setRange(-90, 900)
-        self.markup.setSuffix(" ٪")
+        self.markup.setSuffix("  ٪")
         self.markup.setDecimals(1)
-        form.addRow("درصد سود روی قیمت ایساکو:", self.markup)
+        price_card.add(field("درصد سود روی قیمت ایساکو", self.markup))
 
         self.base = QComboBox()
         self.base.addItem("قیمت با ارزش افزوده", "vat")
         self.base.addItem("قیمت مصرف‌کننده (خرده)", "retail")
         self.base.addItem("قیمت عمده (فی فروش)", "wholesale")
-        form.addRow("مبنای قیمت:", self.base)
+        price_card.add(field("مبنای قیمت", self.base))
 
         self.round_to = QComboBox()
         for label, val in [("بدون رند", 0), ("۱٬۰۰۰ تومان", 1000),
                            ("۵٬۰۰۰ تومان", 5000), ("۱۰٬۰۰۰ تومان", 10000)]:
             self.round_to.addItem(label, val)
         self.round_to.setCurrentIndex(1)
-        form.addRow("رند کردن قیمت به:", self.round_to)
+        price_card.add(field("رند کردن قیمت به", self.round_to))
 
         self.max_change = QSpinBox()
         self.max_change.setRange(0, 1000)
-        self.max_change.setSuffix(" ٪")
-        form.addRow("سقف تغییر مجاز خودکار:", self.max_change)
+        self.max_change.setSuffix("  ٪")
+        price_card.add(field("سقف تغییر مجاز خودکار", self.max_change))
 
-        price_card.body().addLayout(form)
         price_card.add(muted(
-            "«سقف تغییر» یعنی اگر قیمتی بیش از این درصد تغییر کند، خودکار اعمال "
+            "«سقف تغییر»: اگر قیمتی بیش از این درصد تغییر کند، خودکار اعمال "
             "نمی‌شود و برای بررسی دستی زرد علامت می‌خورد. ۰ یعنی بدون محدودیت."
         ))
         layout.addWidget(price_card)
 
         # --- قواعد موجودی ---
         stock_card = Card("قواعد موجودی")
-        sform = QFormLayout()
-        sform.setSpacing(12)
-
         self.max_stock = QSpinBox()
         self.max_stock.setRange(0, 100000)
-        sform.addRow("سقف موجودی روی سایت:", self.max_stock)
-
+        stock_card.add(field("سقف موجودی روی سایت", self.max_stock))
         self.reserve = QSpinBox()
         self.reserve.setRange(0, 1000)
-        sform.addRow("موجودی رزرو (نمایش نده):", self.reserve)
-
-        stock_card.body().addLayout(sform)
+        stock_card.add(field("موجودی رزرو (نمایش نده)", self.reserve))
         stock_card.add(muted(
             "سقف موجودی: حتی اگر انبار بیشتر داشته باشد، روی سایت بیشتر از این "
             "عدد نمایش داده نمی‌شود. ۰ یعنی بدون سقف."
@@ -102,51 +93,74 @@ class SettingsTab(QWidget):
 
         # --- اعتبارنامه‌ها ---
         cred_card = Card("اتصال‌ها")
-        cform = QFormLayout()
-        cform.setSpacing(12)
-
         self.woo_url = QLineEdit()
         self.woo_url.setPlaceholderText("https://texayadak.com")
-        cform.addRow("آدرس سایت:", self.woo_url)
+        cred_card.add(field("آدرس سایت", self.woo_url))
         self.woo_key = QLineEdit()
         self.woo_key.setPlaceholderText("ck_...")
-        cform.addRow("کلید ووکامرس:", self.woo_key)
+        cred_card.add(field("کلید ووکامرس (Consumer Key)", self.woo_key))
         self.woo_secret = QLineEdit()
         self.woo_secret.setEchoMode(QLineEdit.EchoMode.Password)
         self.woo_secret.setPlaceholderText("cs_...")
-        cform.addRow("رمز ووکامرس:", self.woo_secret)
+        cred_card.add(field("رمز ووکامرس (Consumer Secret)", self.woo_secret))
 
+        row = QHBoxLayout()
+        row.setSpacing(12)
         self.isaco_scus = QLineEdit()
-        cform.addRow("کد نمایندگی ایساکو:", self.isaco_scus)
         self.isaco_user = QLineEdit()
-        cform.addRow("نام کاربری ایساکو:", self.isaco_user)
+        row.addWidget(field("کد نمایندگی ایساکو", self.isaco_scus), 1)
+        row.addWidget(field("نام کاربری ایساکو", self.isaco_user), 1)
+        cred_card.body().addLayout(row)
         self.isaco_pass = QLineEdit()
         self.isaco_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        cform.addRow("رمز ایساکو:", self.isaco_pass)
+        cred_card.add(field("رمز ایساکو", self.isaco_pass))
 
-        cred_card.body().addLayout(cform)
         self._secure_note = muted("")
         cred_card.add(self._secure_note)
         layout.addWidget(cred_card)
 
-        # --- مسیر منابع داده (برای سینک خودکار) ---
+        # --- مسیر منابع ---
         paths_card = Card("مسیر فایل‌های داده (برای سینک خودکار)")
-        self.haseb_path = self._path_row(
-            paths_card, "فایل cal.DBF حاسب:", "فایل DBF (*.DBF *.dbf)")
-        self.isaco_path = self._path_row(
-            paths_card, "آخرین فایل اکسل ایساکو:", "اکسل (*.xlsx *.xls)")
+        self.haseb_path = self._path_row(paths_card, "فایل cal.DBF حاسب",
+                                         "فایل DBF (*.DBF *.dbf)")
+        self.isaco_path = self._path_row(paths_card, "فایل اکسل ایساکو (اختیاری)",
+                                         "اکسل (*.xlsx *.xls)")
         paths_card.add(muted(
-            "سینک خودکار شبانه از این مسیرها می‌خواند. مسیر cal.DBF معمولاً در "
-            "پوشهٔ نصب حاسب (DBF2) است. فایل ایساکو را روزانه دانلود و اینجا "
-            "تنظیم کنید (یا از تب سینک ایساکو دستی استفاده کنید)."
+            "مسیر cal.DBF معمولاً در پوشهٔ نصب حاسب (DBF2) است. اگر سینک خودکار "
+            "فعال باشد، از این مسیرها می‌خواند."
         ))
         layout.addWidget(paths_card)
 
-        save = QPushButton("ذخیرهٔ تنظیمات")
+        save = QPushButton("💾  ذخیرهٔ تنظیمات")
         save.setObjectName("Primary")
+        save.setMinimumHeight(46)
         save.clicked.connect(self._save)
         layout.addWidget(save)
         layout.addStretch(1)
+
+        outer.addWidget(scrollable(content))
+
+    def _path_row(self, card: Card, label: str, filter_: str) -> QLineEdit:
+        line = QLineEdit()
+        line.setReadOnly(True)
+        line.setPlaceholderText("انتخاب نشده")
+        browse = QPushButton("انتخاب ...")
+        browse.setMaximumWidth(120)
+
+        def pick():
+            path, _ = QFileDialog.getOpenFileName(self, label, "", filter_)
+            if path:
+                line.setText(path)
+
+        browse.clicked.connect(pick)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(line, 1)
+        row.addWidget(browse)
+        wrapper = QWidget()
+        wrapper.setLayout(row)
+        card.add(field(label, wrapper))
+        return line
 
     def _load(self) -> None:
         self.markup.setValue(float(self.db.get_setting("markup_percent", 0)))
@@ -177,26 +191,6 @@ class SettingsTab(QWidget):
             self._secure_note.setText(
                 "⚠️ ذخیرهٔ امن سیستم در دسترس نیست؛ رمزها با احتیاط نگهداری می‌شوند."
             )
-
-    def _path_row(self, card: Card, label: str, filter_: str) -> QLineEdit:
-        """یک ردیف انتخاب فایل می‌سازد و QLineEdit مسیر را برمی‌گرداند."""
-        card.add(QLabel(label))
-        line = QLineEdit()
-        line.setReadOnly(True)
-        browse = QPushButton("انتخاب ...")
-        browse.setMaximumWidth(110)
-
-        def pick():
-            path, _ = QFileDialog.getOpenFileName(self, label, "", filter_)
-            if path:
-                line.setText(path)
-
-        browse.clicked.connect(pick)
-        row = QHBoxLayout()
-        row.addWidget(line, 1)
-        row.addWidget(browse)
-        card.body().addLayout(row)
-        return line
 
     @staticmethod
     def _set_combo(combo: QComboBox, value) -> None:

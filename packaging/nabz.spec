@@ -33,11 +33,14 @@ hidden = [
     "openpyxl",
 ]
 
+# فایل‌های گرافیکی (لوگو و آیکون) باید داخل بسته قرار بگیرند
+assets_src = os.path.join(SRC_PATH, "nabz", "ui", "assets")
+
 a = Analysis(
     [ENTRY_SCRIPT],
     pathex=[SRC_PATH],
     binaries=[],
-    datas=[],
+    datas=[(assets_src, os.path.join("nabz", "ui", "assets"))],
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],

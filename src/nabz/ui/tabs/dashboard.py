@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from ...db import Database
 from ..theme import COLORS
-from ..widgets import Card, StatCard, muted
+from ..widgets import Card, StatCard, muted, scrollable
 
 
 def _jalali_ago(ts: float | None) -> str:
@@ -43,9 +43,14 @@ class DashboardTab(QWidget):
         self.refresh()
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(22, 22, 22, 22)
         layout.setSpacing(16)
+        self._outer = outer
+        self._content = content
 
         header = QLabel("داشبورد")
         header.setObjectName("H1")
@@ -86,6 +91,7 @@ class DashboardTab(QWidget):
         ))
         layout.addWidget(actions)
         layout.addStretch(1)
+        self._outer.addWidget(scrollable(self._content))
 
     def refresh(self) -> None:
         runs = self.db.recent_runs(limit=100)

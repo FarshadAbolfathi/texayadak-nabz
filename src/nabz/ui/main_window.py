@@ -7,18 +7,22 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QObject, Signal
 from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
     QSystemTrayIcon,
     QTabWidget,
+    QVBoxLayout,
     QWidget,
 )
 
 from ..config import CredentialStore
 from ..db import Database
 from ..scheduler import ScheduleConfig, SyncScheduler
+from .assets import logo_pixmap
 from .tabs.dashboard import DashboardTab
 from .tabs.help import HelpTab
 from .tabs.settings import SettingsTab
@@ -64,18 +68,27 @@ class MainWindow(QMainWindow):
         self.dashboard = DashboardTab(self.db)
         self.settings = SettingsTab(self.db, self.store)
 
-        # تب‌های اصلی
-        self.tabs.addTab(self.dashboard, "داشبورد")
+        # تب‌های اصلی (با شکلک برای خوانایی بهتر)
+        self.tabs.addTab(self.dashboard, "🏠  داشبورد")
         self._add_lazy_sync_tab()
         self._add_lazy_excel_tab()
         self._add_lazy_products_tab()
-        self.tabs.addTab(self.settings, "تنظیمات")
+        self.tabs.addTab(self.settings, "⚙️  تنظیمات")
         self._add_lazy_schedule_tab()
         self._add_lazy_reports_tab()
-        self.tabs.addTab(HelpTab(), "راهنما")
-        self.tabs.addTab(SupportTab(), "پشتیبانی")
+        self.tabs.addTab(HelpTab(), "❓  راهنما")
+        self.tabs.addTab(SupportTab(), "📞  پشتیبانی")
 
-        self.setCentralWidget(self.tabs)
+        # هدر برند بالای پنجره
+        root = QWidget()
+        root.setObjectName("Root")
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        root_layout.addWidget(self._build_header())
+        root_layout.addWidget(self.tabs, 1)
+
+        self.setCentralWidget(root)
         self.statusBar().showMessage("آماده")
 
         # اتصال دکمه‌های داشبورد
@@ -83,32 +96,55 @@ class MainWindow(QMainWindow):
         self.dashboard.rollback_requested.connect(self._rollback)
         self.settings.settings_changed.connect(self._on_settings_changed)
 
+    def _build_header(self) -> QWidget:
+        header = QFrame()
+        header.setObjectName("Header")
+        header.setFixedHeight(64)
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(20, 8, 20, 8)
+
+        logo = QLabel()
+        pix = logo_pixmap(height=40)
+        if not pix.isNull():
+            logo.setPixmap(pix)
+        else:
+            name = QLabel("تکسایدک نبض")
+            name.setObjectName("BrandName")
+            layout.addWidget(name)
+        layout.addWidget(logo)
+        layout.addStretch(1)
+
+        sub = QLabel("همگام‌سازی قیمت و موجودی")
+        sub.setObjectName("Muted")
+        layout.addWidget(sub)
+        return header
+
     # -- تب‌هایی که هنگام نیاز ساخته می‌شوند (تا وارد کردن سنگین به تأخیر بیفتد) --
 
     def _add_lazy_sync_tab(self) -> None:
         from .tabs.sync import SyncTab
         self.sync = SyncTab(self.db, self.store)
         self.sync.finished_apply.connect(self.dashboard.refresh)
-        self.tabs.addTab(self.sync, "سینک ایساکو")
+        self.tabs.addTab(self.sync, "🔄  سینک ایساکو")
 
     def _add_lazy_excel_tab(self) -> None:
         from .tabs.excel_import import ExcelImportTab
-        self.tabs.addTab(ExcelImportTab(self.db, self.store), "ایمپورت اکسل")
+        self.tabs.addTab(ExcelImportTab(self.db, self.store), "📥  ایمپورت اکسل")
 
     def _add_lazy_products_tab(self) -> None:
         from .tabs.products import ProductsTab
-        self.tabs.addTab(ProductsTab(self.db, self.store), "محصولات سایت")
+        self.tabs.addTab(ProductsTab(self.db, self.store), "🛒  محصولات سایت")
 
     def _add_lazy_schedule_tab(self) -> None:
         from .tabs.schedule import ScheduleTab
         self.schedule = ScheduleTab(self.db)
         self.schedule.schedule_changed.connect(self._apply_schedule)
-        self.tabs.addTab(self.schedule, "زمان‌بندی")
+        self.tabs.addTab(self.schedule, "⏰  زمان‌بندی")
 
     def _add_lazy_reports_tab(self) -> None:
         from .tabs.reports import ReportsTab
         self.reports = ReportsTab(self.db)
-        self.tabs.addTab(self.reports, "گزارش‌ها")
+        self.tabs.addTab(self.reports, "📊  گزارش‌ها")
 
     # -- اقدامات --------------------------------------------------------
 

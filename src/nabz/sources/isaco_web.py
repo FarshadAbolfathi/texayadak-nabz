@@ -320,6 +320,46 @@ class IsacoClient:
             PRICE_SEARCH_PATH, {"WgdsGds": code8}, authorized=True
         )
 
+    def download_price_list_excel(self, dest: str, params: dict | None = None) -> str:
+        """لیست قیمت را از ایساکو می‌گیرد و به‌صورت فایل اکسل ذخیره می‌کند.
+
+        پاسخ endpoint چند شکل ممکن دارد؛ همه را پوشش می‌دهیم:
+        - محتوای باینری اکسل مستقیم
+        - JSON شامل مسیر/نام فایل تولیدشده (که سپس دانلود می‌شود)
+        - JSON شامل محتوای base64
+
+        در صورت هر خطا، استثنای روشن پرتاب می‌شود تا لایهٔ بالاتر به فایل
+        دستی برگردد.
+        """
+        result = self.request_price_list(params)
+
+        # حالت ۱: پاسخ شامل مسیر/نام فایل
+        if isinstance(result, dict):
+            data = result.get("Data") if isinstance(result.get("Data"), (dict, str)) else result
+            file_ref = None
+            if isinstance(data, dict):
+                for key in ("File", "FilePath", "Path", "Url", "FileName", "file", "url"):
+                    if data.get(key):
+                        file_ref = str(data[key])
+                        break
+                # حالت ۳: محتوای base64
+                for key in ("Base64", "Content", "FileContent", "base64"):
+                    if data.get(key):
+                        import base64
+                        with open(dest, "wb") as handle:
+                            handle.write(base64.b64decode(data[key]))
+                        return dest
+            elif isinstance(data, str) and data.lower().endswith((".xlsx", ".xls")):
+                file_ref = data
+
+            if file_ref:
+                return self.download_file(file_ref, dest)
+
+        raise IsacoApiError(
+            "ساختار پاسخ دانلود اکسل ایساکو شناخته نشد. "
+            "لطفاً فایل را دستی از پورتال دانلود کنید یا با پشتیبانی تماس بگیرید."
+        )
+
     def download_file(self, url_or_path: str, dest: str) -> str:
         """فایل تولیدشده را دانلود و ذخیره می‌کند."""
         url = url_or_path

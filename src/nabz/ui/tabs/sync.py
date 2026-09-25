@@ -1,10 +1,18 @@
-"""تب سینک ایساکو — دانلود، مقایسه، پیش‌نمایش، اعمال.
+"""تب سینک — جریان واحد: دریافت خودکار قیمت ایساکو + موجودی حاسب → مقایسه → اعمال.
 
-کارهای شبکه‌ای (دانلود لیست قیمت، خواندن محصولات، اعمال) روی یک نخ جدا
-انجام می‌شوند تا رابط کاربری هنگ نکند.
+یک دکمه همه‌چیز را انجام می‌دهد:
+۱) لیست قیمت ایساکو را خودکار دانلود می‌کند (اگر نشد، از فایل تنظیم‌شده).
+۲) موجودی را از دیتابیس حاسب می‌خواند.
+۳) با محصولات سایت مقایسه می‌کند و قیمت/موجودی جدید را حساب می‌کند.
+۴) جدول پیش‌نمایش نشان می‌دهد؛ با تأیید، روی سایت اعمال می‌شود.
+
+اعمال خودکار (بدون تأیید) در تب زمان‌بندی تنظیم می‌شود.
 """
 
 from __future__ import annotations
+
+import tempfile
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QBrush, QColor
@@ -27,65 +35,139 @@ from ...config import CredentialStore
 from ...db import Database
 from ...engine import SyncPlan, build_plan
 from ...runner import apply_plan, rollback_run
+from ...sources.haseb_dbf import load_products as load_haseb
 from ...sources.isaco_excel import load as load_isaco
 from ..services import (
     price_rules_from_db,
     stock_rules_from_db,
     woo_client_from_store,
 )
-from ..theme import COLORS
 from ..widgets import Card, muted
 
 
 class CompareWorker(QObject):
-    """در پس‌زمینه: محصولات سایت را می‌خواند و با فایل ایساکو مقایسه می‌کند."""
+    """در پس‌زمینه: قیمت ایساکو + موجودی حاسب را می‌گیرد و مقایسه می‌کند."""
 
     progress = Signal(str)
-    done = Signal(object)      # SyncPlan
+    done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, db: Database, store: CredentialStore, isaco_path: str):
+    def __init__(self, db: Database, store: CredentialStore, manual_excel: str | None):
         super().__init__()
         self.db = db
         self.store = store
-        self.isaco_path = isaco_path
+        self.manual_excel = manual_excel
 
     def run(self) -> None:
         try:
-            self.progress.emit("در حال خواندن فایل لیست قیمت ایساکو ...")
-            isaco = load_isaco(self.isaco_path)
+            isaco = self._load_isaco_prices()
+            haseb = self._load_haseb_stock()
 
-            self.progress.emit("در حال اتصال به سایت و خواندن محصولات ...")
+            if not isaco and not haseb:
+                self.failed.emit(
+                    "نه قیمت ایساکو در دسترس است و نه موجودی حاسب.\n"
+                    "در تنظیمات مسیر فایل حاسب را بدهید یا فایل ایساکو را دستی انتخاب کنید."
+                )
+                return
+
+            self.progress.emit("در حال خواندن محصولات سایت ...")
             woo = woo_client_from_store(self.store)
             if woo is None:
                 self.failed.emit("اطلاعات اتصال ووکامرس در تنظیمات کامل نیست.")
                 return
             products = woo.fetch_products()
 
-            self.progress.emit("در حال مقایسه و محاسبهٔ قیمت‌ها ...")
+            self.progress.emit("در حال مقایسه و محاسبه ...")
             plan = build_plan(
                 products=products,
                 isaco=isaco,
-                haseb={},   # موجودی حاسب در ایمپورت جدا سینک می‌شود
+                haseb=haseb,
                 price_rules=price_rules_from_db(self.db),
                 stock_rules=stock_rules_from_db(self.db),
-                update_stock=False,
+                update_price=bool(isaco),
+                update_stock=bool(haseb),
             )
-            self.done.emit(plan)
-        except Exception as exc:  # noqa: BLE001 - می‌خواهیم هر خطا به UI برسد
+            self.done.emit((plan, bool(isaco), bool(haseb)))
+        except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
+
+    def _load_isaco_prices(self) -> dict:
+        """قیمت‌ها را می‌گیرد: فایل دستی → دانلود خودکار → فایل تنظیم‌شده."""
+        # ۱) فایلی که کاربر دستی انتخاب کرده
+        if self.manual_excel:
+            self.progress.emit("در حال خواندن فایل ایساکو ...")
+            return load_isaco(self.manual_excel)
+
+        # ۲) تلاش برای دانلود خودکار از پورتال ایساکو
+        isaco_creds = self.store.load_isaco()
+        if isaco_creds.scus and isaco_creds.username and isaco_creds.password:
+            try:
+                self.progress.emit("در حال ورود به ایساکو و دانلود لیست قیمت ...")
+                path = self._auto_download()
+                if path:
+                    return load_isaco(path)
+            except Exception as exc:  # noqa: BLE001 - به فایل تنظیم‌شده برمی‌گردیم
+                self.progress.emit(f"دانلود خودکار نشد ({exc}). تلاش با فایل تنظیم‌شده ...")
+
+        # ۳) فایل تنظیم‌شده در تنظیمات
+        configured = self.db.get_setting("isaco_excel_path", "")
+        if configured and Path(configured).is_file():
+            self.progress.emit("در حال خواندن فایل تنظیم‌شدهٔ ایساکو ...")
+            return load_isaco(configured)
+
+        return {}
+
+    def _auto_download(self) -> str | None:
+        """لاگین و دانلود خودکار لیست قیمت ایساکو."""
+        import re
+        import requests
+
+        from ...sources.isaco_web import (
+            IsacoClient,
+            IsacoCredentials,
+            fetch_client_version,
+        )
+
+        creds_cfg = self.store.load_isaco()
+        # کلید خصوصی کلاینت از باندل زندهٔ سایت
+        bundle = requests.get(
+            "https://b2b.isaco.ir/static/js/19.b703063e.chunk.js", timeout=60
+        ).text
+        match = re.search(r"MIIEvQIBADANBgkqhkiG9w0B[A-Za-z0-9+/=]+", bundle)
+        if not match:
+            return None
+        client = IsacoClient(match.group(0))
+        client.login(IsacoCredentials(
+            scus=creds_cfg.scus,
+            username=creds_cfg.username,
+            password=creds_cfg.password,
+            client_version=fetch_client_version(),
+        ))
+        dest = str(Path(tempfile.gettempdir()) / "isaco_pricelist.xlsx")
+        client.download_price_list_excel(dest)
+        # مسیر دانلود را برای دفعهٔ بعد ذخیره می‌کنیم
+        self.db.set_setting("isaco_excel_path", dest)
+        return dest
+
+    def _load_haseb_stock(self) -> dict:
+        haseb_path = self.db.get_setting("haseb_cal_path", "")
+        if not (haseb_path and Path(haseb_path).is_file()):
+            return {}
+        self.progress.emit("در حال خواندن موجودی از حاسب ...")
+        warehouses = self.db.get_setting("isaco_warehouses", None)
+        wh = set(warehouses) if warehouses else None
+        return load_haseb(haseb_path, warehouses=wh)
 
 
 class ApplyWorker(QObject):
     progress = Signal(str)
-    done = Signal(object)      # ApplyResult
+    done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, db: Database, store: CredentialStore, plan: SyncPlan):
+    def __init__(self, db, store, plan, include_price, include_stock):
         super().__init__()
-        self.db = db
-        self.store = store
-        self.plan = plan
+        self.db, self.store, self.plan = db, store, plan
+        self.include_price, self.include_stock = include_price, include_stock
 
     def run(self) -> None:
         try:
@@ -94,7 +176,10 @@ class ApplyWorker(QObject):
             if woo is None:
                 self.failed.emit("اطلاعات اتصال ووکامرس کامل نیست.")
                 return
-            result = apply_plan(self.plan, woo, self.db, mode="manual")
+            result = apply_plan(
+                self.plan, woo, self.db, mode="manual",
+                include_price=self.include_price, include_stock=self.include_stock,
+            )
             self.done.emit(result)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
@@ -103,109 +188,105 @@ class ApplyWorker(QObject):
 class SyncTab(QWidget):
     finished_apply = Signal()
 
-    HEADERS = ["کد (SKU)", "نام محصول", "قیمت فعلی", "قیمت جدید", "٪ تغییر", "وضعیت"]
+    HEADERS = ["کد (SKU)", "نام محصول", "قیمت فعلی", "قیمت جدید",
+               "موجودی فعلی", "موجودی جدید", "وضعیت"]
 
     def __init__(self, db: Database, store: CredentialStore, parent=None):
         super().__init__(parent)
         self.db = db
         self.store = store
         self._plan: SyncPlan | None = None
-        self._thread: QThread | None = None
+        self._inc_price = False
+        self._inc_stock = False
         self._build()
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(22, 22, 22, 22)
         layout.setSpacing(14)
 
-        header = QLabel("سینک قیمت از ایساکو")
+        header = QLabel("سینک قیمت و موجودی")
         header.setObjectName("H1")
         layout.addWidget(header)
 
-        # نوار ابزار
         toolbar = Card()
         row = QHBoxLayout()
         row.setSpacing(10)
 
-        self.pick_btn = QPushButton("📂  انتخاب فایل اکسل ایساکو")
-        self.pick_btn.clicked.connect(self._pick_file)
-        row.addWidget(self.pick_btn)
+        self.fetch_btn = QPushButton("🔄  دریافت و مقایسه")
+        self.fetch_btn.setObjectName("Primary")
+        self.fetch_btn.setMinimumHeight(44)
+        self.fetch_btn.clicked.connect(self._fetch)
+        row.addWidget(self.fetch_btn, 2)
 
-        self.compare_btn = QPushButton("🔍  مقایسه با سایت")
-        self.compare_btn.setObjectName("Primary")
-        self.compare_btn.setEnabled(False)
-        self.compare_btn.clicked.connect(self._compare)
-        row.addWidget(self.compare_btn)
+        self.pick_btn = QPushButton("📂  فایل ایساکو دستی")
+        self.pick_btn.clicked.connect(self._pick_file)
+        row.addWidget(self.pick_btn, 1)
 
         self.apply_btn = QPushButton("✅  اعمال روی سایت")
         self.apply_btn.setObjectName("Success")
         self.apply_btn.setEnabled(False)
+        self.apply_btn.setMinimumHeight(44)
         self.apply_btn.clicked.connect(self._apply)
-        row.addWidget(self.apply_btn)
+        row.addWidget(self.apply_btn, 2)
 
-        row.addStretch(1)
         toolbar.body().addLayout(row)
-        self._file_label = muted("هنوز فایلی انتخاب نشده. فایل روزانه را از پورتال ایساکو دانلود کنید.")
-        toolbar.add(self._file_label)
+        self._info = muted(
+            "«دریافت و مقایسه» خودکار قیمت را از ایساکو و موجودی را از حاسب می‌گیرد. "
+            "اگر دانلود خودکار میسر نشد، از فایل ایساکوی دستی/تنظیم‌شده استفاده می‌شود."
+        )
+        toolbar.add(self._info)
         layout.addWidget(toolbar)
 
-        # نوار پیشرفت
         self.progress = QProgressBar()
-        self.progress.setRange(0, 0)  # حالت نامعین
+        self.progress.setRange(0, 0)
         self.progress.hide()
         layout.addWidget(self.progress)
-
         self.status = muted("")
         layout.addWidget(self.status)
 
-        # جدول
         self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
-        head = self.table.horizontalHeader()
-        head.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
         layout.addWidget(self.table, 1)
 
-        self._isaco_path: str | None = None
-
-    # -- انتخاب فایل ---------------------------------------------------
+        self._manual_path: str | None = None
 
     def _pick_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "انتخاب فایل لیست قیمت ایساکو", "",
-            "فایل اکسل (*.xlsx *.xls)",
+            self, "انتخاب فایل لیست قیمت ایساکو", "", "فایل اکسل (*.xlsx *.xls)"
         )
         if path:
-            self._isaco_path = path
-            self._file_label.setText(f"فایل انتخاب‌شده: {path}")
-            self.compare_btn.setEnabled(True)
+            self._manual_path = path
+            self.status.setText(f"فایل دستی انتخاب شد: {path}")
 
-    # -- مقایسه --------------------------------------------------------
-
-    def _compare(self) -> None:
-        if not self._isaco_path:
-            return
+    def _fetch(self) -> None:
         self._set_busy(True)
-        worker = CompareWorker(self.db, self.store, self._isaco_path)
+        worker = CompareWorker(self.db, self.store, self._manual_path)
         self._run_worker(worker, self._on_compared)
 
-    def _on_compared(self, plan: SyncPlan) -> None:
+    def _on_compared(self, result) -> None:
+        plan, inc_price, inc_stock = result
         self._plan = plan
+        self._inc_price, self._inc_stock = inc_price, inc_stock
         self._fill_table(plan)
         self._set_busy(False)
         s = plan.summary()
         self.status.setText(
-            f"مقایسه انجام شد: {self._fa(s['changes'])} تغییر، "
-            f"{self._fa(s['needs_review'])} نیازمند بررسی، "
-            f"{self._fa(s['no_isaco_price'])} بدون قیمت ایساکو."
+            f"مقایسه انجام شد — تغییرات: {self._fa(s['changes'])} | "
+            f"قیمت: {self._fa(s['price_changes'])} | موجودی: {self._fa(s['stock_changes'])} | "
+            f"نیازمند بررسی: {self._fa(s['needs_review'])}"
         )
         self.apply_btn.setEnabled(s["changes"] > 0)
 
     def _fill_table(self, plan: SyncPlan) -> None:
-        rows = [i for i in plan.items if i.price_changes or i.needs_review]
+        rows = [i for i in plan.items if i.changes or i.needs_review]
         self.table.setRowCount(len(rows))
         for r, item in enumerate(rows):
             review = item.needs_review
@@ -214,40 +295,39 @@ class SyncTab(QWidget):
                 item.name,
                 self._money(item.current_price),
                 self._money(item.new_price),
-                self._pct(item),
+                self._num(item.current_stock),
+                self._num(item.new_stock),
                 "بررسی شود" if review else "آماده",
             ]
             for c, text in enumerate(cells):
                 cell = QTableWidgetItem(text)
-                if c in (2, 3, 4):
+                if c not in (1,):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if review:
                     cell.setBackground(QBrush(QColor("#fff8e1")))
                 self.table.setItem(r, c, cell)
-
-    # -- اعمال ---------------------------------------------------------
 
     def _apply(self) -> None:
         if not self._plan:
             return
         confirm = QMessageBox.question(
             self, "اعمال روی سایت",
-            "قیمت‌های جدید روی سایت اعمال شوند؟ (قابل بازگشت است)",
+            "تغییرات روی سایت اعمال شوند؟ (قابل بازگشت است)",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
         self._set_busy(True)
-        worker = ApplyWorker(self.db, self.store, self._plan)
+        worker = ApplyWorker(self.db, self.store, self._plan,
+                             self._inc_price, self._inc_stock)
         self._run_worker(worker, self._on_applied)
 
     def _on_applied(self, result) -> None:
         self._set_busy(False)
-        QMessageBox.information(
-            self, "انجام شد",
-            f"{self._fa(result.applied_count)} محصول به‌روز شد."
-            + (f"\n{self._fa(len(result.outcome.failed))} خطا." if result.outcome.failed else ""),
-        )
+        msg = f"{self._fa(result.applied_count)} محصول به‌روز شد."
+        if result.outcome.failed:
+            msg += f"\n{self._fa(len(result.outcome.failed))} خطا."
+        QMessageBox.information(self, "انجام شد", msg)
         self.apply_btn.setEnabled(False)
         self.finished_apply.emit()
 
@@ -265,8 +345,6 @@ class SyncTab(QWidget):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "خطا", f"بازگردانی ناموفق: {exc}")
 
-    # -- زیرساخت نخ ----------------------------------------------------
-
     def _run_worker(self, worker: QObject, on_done) -> None:
         thread = QThread()
         worker.moveToThread(thread)
@@ -274,12 +352,10 @@ class SyncTab(QWidget):
         worker.progress.connect(self.status.setText)
         worker.done.connect(on_done)
         worker.failed.connect(self._on_failed)
-        for sig in (worker.done, worker.failed):
-            sig.connect(thread.quit)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
         thread.finished.connect(thread.deleteLater)
-        # نگه‌داشتن ارجاع تا garbage collect نشود
-        self._thread = thread
-        self._worker = worker
+        self._thread, self._worker = thread, worker
         thread.start()
 
     def _on_failed(self, message: str) -> None:
@@ -289,23 +365,17 @@ class SyncTab(QWidget):
 
     def _set_busy(self, busy: bool) -> None:
         self.progress.setVisible(busy)
+        self.fetch_btn.setEnabled(not busy)
         self.pick_btn.setEnabled(not busy)
-        self.compare_btn.setEnabled(not busy and self._isaco_path is not None)
         if busy:
             self.apply_btn.setEnabled(False)
-
-    # -- کمکی نمایش ----------------------------------------------------
 
     @staticmethod
     def _fa(n) -> str:
         return str(n).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
 
     def _money(self, value) -> str:
-        if value is None:
-            return "—"
-        return self._fa(f"{value:,}") + " ت"
+        return "—" if value is None else self._fa(f"{value:,}") + " ت"
 
-    def _pct(self, item) -> str:
-        if item.price_result and item.price_result.change_percent is not None:
-            return self._fa(f"{item.price_result.change_percent:+.0f}") + "٪"
-        return "—"
+    def _num(self, value) -> str:
+        return "—" if value is None else self._fa(value)

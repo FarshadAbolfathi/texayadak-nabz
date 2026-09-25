@@ -21,6 +21,8 @@ def run(db_path: str | Path | None = None) -> int:
     app.setApplicationName("تکسایدک نبض")
     app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
     app.setStyleSheet(stylesheet())
+    from .tray import app_icon
+    app.setWindowIcon(app_icon())
 
     path = Path(db_path) if db_path else default_db_path()
     db = Database(path)

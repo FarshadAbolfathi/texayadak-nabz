@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...db import Database
-from ..widgets import Card, muted
+from ..widgets import Card, muted, scrollable
 
 
 class ScheduleTab(QWidget):
@@ -32,8 +32,11 @@ class ScheduleTab(QWidget):
         self._load()
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(22, 22, 22, 22)
         layout.setSpacing(16)
 
         header = QLabel("زمان‌بندی خودکار")
@@ -66,11 +69,13 @@ class ScheduleTab(QWidget):
         ))
         layout.addWidget(card)
 
-        save = QPushButton("ذخیرهٔ زمان‌بندی")
+        save = QPushButton("💾  ذخیرهٔ زمان‌بندی")
         save.setObjectName("Primary")
+        save.setMinimumHeight(46)
         save.clicked.connect(self._save)
         layout.addWidget(save)
         layout.addStretch(1)
+        outer.addWidget(scrollable(content))
 
     def _load(self) -> None:
         self.enabled.setChecked(bool(self.db.get_setting("schedule_enabled", False)))
