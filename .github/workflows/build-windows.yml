@@ -56,3 +56,17 @@ jobs:
           name: TexayadakNabz-Setup
           path: packaging/Output/*.exe
           if-no-files-found: warn
+
+      # انتشار فایل نصبی در صفحهٔ Releases برای دانلود ساده‌تر
+      - name: انتشار در Releases
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: نسخهٔ نصبی ${{ github.run_number }}
+          body: |
+            فایل نصبی تکسایدک نبض.
+            فایل `TexayadakNabz-Setup-*.exe` را دانلود و روی سیستم کارفرما نصب کنید.
+          files: |
+            packaging/Output/*.exe
+          fail_on_unmatched_files: false
