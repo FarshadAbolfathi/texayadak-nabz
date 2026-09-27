@@ -17,12 +17,18 @@ from .theme import stylesheet
 
 def run(db_path: str | Path | None = None) -> int:
     """برنامه را اجرا می‌کند: ورود با رمز، سپس پنجرهٔ اصلی."""
+    from ..logging_setup import setup_logging
+    logger = setup_logging()
+
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("تکسایدک نبض")
     app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
     app.setStyleSheet(stylesheet())
     from .tray import app_icon
     app.setWindowIcon(app_icon())
+
+    from ..build_info import BUILD_NUMBER, COMMIT
+    logger.info("نسخه build=%s commit=%s", BUILD_NUMBER, COMMIT)
 
     path = Path(db_path) if db_path else default_db_path()
     db = Database(path)

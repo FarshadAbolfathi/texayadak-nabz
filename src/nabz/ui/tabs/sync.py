@@ -11,8 +11,11 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
+
+_log = logging.getLogger("nabz.sync")
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QBrush, QColor
@@ -89,6 +92,7 @@ class CompareWorker(QObject):
             )
             self.done.emit((plan, bool(isaco), bool(haseb)))
         except Exception as exc:  # noqa: BLE001
+            _log.exception("خطا در مقایسهٔ سینک")
             self.failed.emit(str(exc))
 
     def _load_isaco_prices(self) -> dict:
@@ -107,6 +111,7 @@ class CompareWorker(QObject):
                 if path:
                     return load_isaco(path)
             except Exception as exc:  # noqa: BLE001 - به فایل تنظیم‌شده برمی‌گردیم
+                _log.warning("دانلود خودکار ایساکو نشد: %s", exc, exc_info=True)
                 self.progress.emit(f"دانلود خودکار نشد ({exc}). تلاش با فایل تنظیم‌شده ...")
 
         # ۳) فایل تنظیم‌شده در تنظیمات
@@ -182,6 +187,7 @@ class ApplyWorker(QObject):
             )
             self.done.emit(result)
         except Exception as exc:  # noqa: BLE001
+            _log.exception("خطا در اعمال سینک")
             self.failed.emit(str(exc))
 
 

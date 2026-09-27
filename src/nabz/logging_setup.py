@@ -1,0 +1,88 @@
+"""پیکربندی لاگ برنامه برای دیباگ راحت‌تر.
+
+همهٔ رویدادها و خطاها در یک فایل لاگ نوشته می‌شوند که کارفرما می‌تواند
+برای پشتیبانی بفرستد. لاگ چرخشی است (فایل بزرگ نمی‌شود) و خطاهای
+پیش‌بینی‌نشده هم خودکار ثبت می‌شوند.
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+LOG_DIR_NAME = ".texayadak-nabz"
+LOG_FILE_NAME = "nabz.log"
+
+_configured = False
+
+
+def log_dir() -> Path:
+    path = Path.home() / LOG_DIR_NAME / "logs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def log_file() -> Path:
+    return log_dir() / LOG_FILE_NAME
+
+
+def setup_logging(level: int = logging.INFO) -> logging.Logger:
+    """لاگ را یک‌بار پیکربندی می‌کند و logger ریشه را برمی‌گرداند."""
+    global _configured
+    logger = logging.getLogger("nabz")
+    if _configured:
+        return logger
+
+    logger.setLevel(level)
+    logger.propagate = False
+
+    fmt = logging.Formatter(
+        "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # فایل چرخشی: تا ۱ مگابایت، ۵ فایل پشتیبان
+    file_handler = RotatingFileHandler(
+        log_file(), maxBytes=1_000_000, backupCount=5, encoding="utf-8"
+    )
+    file_handler.setFormatter(fmt)
+    logger.addHandler(file_handler)
+
+    # کنسول هم (برای اجرای توسعه)
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    logger.addHandler(console)
+
+    # ثبت خطاهای پیش‌بینی‌نشده
+    def _excepthook(exc_type, exc_value, exc_tb):
+        logger.critical("خطای پیش‌بینی‌نشده", exc_info=(exc_type, exc_value, exc_tb))
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _excepthook
+
+    _configured = True
+    logger.info("=== شروع برنامه ===")
+    return logger
+
+
+def get_logger(name: str = "nabz") -> logging.Logger:
+    """logger ماژول را می‌دهد (زیرمجموعهٔ لاگ اصلی)."""
+    if name == "nabz":
+        return logging.getLogger("nabz")
+    return logging.getLogger(f"nabz.{name}")
+
+
+def read_recent_log(max_bytes: int = 200_000) -> str:
+    """آخرین بخش فایل لاگ را برمی‌گرداند (برای نمایش در برنامه)."""
+    path = log_file()
+    if not path.is_file():
+        return "فایل لاگ هنوز ساخته نشده است."
+    try:
+        data = path.read_bytes()
+        if len(data) > max_bytes:
+            data = data[-max_bytes:]
+        return data.decode("utf-8", "replace")
+    except OSError as exc:
+        return f"خطا در خواندن فایل لاگ: {exc}"

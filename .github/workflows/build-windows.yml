@@ -34,6 +34,41 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: pytest -q
 
+      - name: نوشتن شمارهٔ build در برنامه
+        shell: pwsh
+        run: |
+          $commit = "${{ github.sha }}".Substring(0,7)
+          $date = (Get-Date).ToString("yyyy-MM-dd")
+          $content = @"
+          from __future__ import annotations
+
+          APP_VERSION = "1.0"
+          BUILD_NUMBER = "${{ github.run_number }}"
+          COMMIT = "$commit"
+          BUILD_DATE = "$date"
+
+
+          def _to_fa(text: str) -> str:
+              return str(text).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+
+
+          def version_line() -> str:
+              parts = [f"نسخهٔ {_to_fa(APP_VERSION)}"]
+              if BUILD_NUMBER and BUILD_NUMBER != "محلی":
+                  parts.append(f"build {_to_fa(BUILD_NUMBER)}")
+              elif BUILD_NUMBER:
+                  parts.append(BUILD_NUMBER)
+              if COMMIT:
+                  parts.append(f"({COMMIT})")
+              line = "  —  ".join(parts[:2])
+              if len(parts) > 2:
+                  line += "  " + parts[2]
+              if BUILD_DATE:
+                  line += f"\nتاریخ ساخت: {_to_fa(BUILD_DATE)}"
+              return line
+          "@
+          Set-Content -Path "src/nabz/build_info.py" -Value $content -Encoding utf8
+
       - name: ساخت فایل اجرایی با PyInstaller
         run: pyinstaller packaging/nabz.spec
 

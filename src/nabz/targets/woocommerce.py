@@ -10,12 +10,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Iterator
 
 import requests
+
+_log = logging.getLogger("nabz.woo")
 
 #: بیشترین تعداد آیتم در هر درخواست batch (محدودیت خود ووکامرس).
 BATCH_LIMIT = 100
@@ -125,13 +128,19 @@ class WooClient:
         delay = self.config.backoff
 
         for attempt in range(1, self.config.retries + 1):
+            _log.debug("%s %s (تلاش %d)", method, path, attempt)
             try:
                 response = self._session.request(method, self._url(path), **kwargs)
             except requests.RequestException as exc:
                 last_error = exc
+                _log.warning("خطای شبکه در %s %s: %s", method, path, exc)
             else:
                 if response.status_code < 500:
                     if not response.ok:
+                        _log.error(
+                            "%s %s → %s | %s", method, path,
+                            response.status_code, response.text[:300],
+                        )
                         raise WooError(
                             f"{method} {path} → {response.status_code}: "
                             f"{response.text[:300]}"
@@ -140,6 +149,8 @@ class WooClient:
                 last_error = WooError(
                     f"{method} {path} → {response.status_code}"
                 )
+                _log.warning("پاسخ ۵xx در %s %s: %s", method, path,
+                             response.status_code)
 
             if attempt < self.config.retries:
                 time.sleep(delay)
