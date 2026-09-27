@@ -35,6 +35,7 @@ class FakeSession:
         self._responses = list(responses)
         self.calls = []
         self.auth = None
+        self.headers = {}
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
@@ -163,6 +164,23 @@ class TestRetry:
         with pytest.raises(WooError, match="401"):
             client.fetch_products()
         assert len(session.calls) == 1
+
+
+class TestServerCompat:
+    """سازگاری با سرورهایی که درخواست غیرمرورگری را ۴۰۳ می‌کنند."""
+
+    def test_browser_user_agent_is_set(self, config):
+        session = FakeSession([])
+        client = WooClient(config, session=session)
+        assert "Mozilla" in session.headers.get("User-Agent", "")
+
+    def test_auth_also_sent_as_query_params(self, config):
+        session = FakeSession([FakeResponse(headers={"X-WP-Total": "5"})])
+        client = WooClient(config, session=session)
+        client.count_products()
+        _, _, kwargs = session.calls[0]
+        assert kwargs["params"]["consumer_key"] == "ck_test"
+        assert kwargs["params"]["consumer_secret"] == "cs_test"
 
 
 class TestBatchOutcome:

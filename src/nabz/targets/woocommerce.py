@@ -88,10 +88,24 @@ class BatchOutcome:
 class WooClient:
     """کلاینت کوچک و متمرکز REST ووکامرس."""
 
+    #: هدرهای شبیه مرورگر واقعی. خیلی از سرورها/فایروال‌ها (ModSecurity،
+    #: Cloudflare، LiteSpeed) درخواست با User-Agent «python-requests» را
+    #: با ۴۰۳ Forbidden بلاک می‌کنند. با این هدرها مثل مرورگر رفتار می‌کنیم.
+    _BROWSER_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "fa,en;q=0.9",
+        "Connection": "keep-alive",
+    }
+
     def __init__(self, config: WooConfig, session: requests.Session | None = None):
         self.config = config
         self._session = session or requests.Session()
         self._session.auth = (config.consumer_key, config.consumer_secret)
+        self._session.headers.update(self._BROWSER_HEADERS)
 
     # -- پایه ----------------------------------------------------------
 
@@ -100,6 +114,13 @@ class WooClient:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         kwargs.setdefault("timeout", self.config.timeout)
+        # اگر سرور هدر Authorization را حذف کند (رایج روی بعضی هاست‌ها)،
+        # کلیدها را به‌صورت پارامتر query هم می‌فرستیم (روی HTTPS امن است).
+        params = kwargs.pop("params", None) or {}
+        params.setdefault("consumer_key", self.config.consumer_key)
+        params.setdefault("consumer_secret", self.config.consumer_secret)
+        kwargs["params"] = params
+
         last_error: Exception | None = None
         delay = self.config.backoff
 

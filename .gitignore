@@ -14,3 +14,4 @@ cal_codes.csv
 config.json
 *.key
 isaco_secrets.local.json
+woo_secrets.local.json

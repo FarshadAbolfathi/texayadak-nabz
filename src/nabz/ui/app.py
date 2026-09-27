@@ -28,10 +28,16 @@ def run(db_path: str | Path | None = None) -> int:
     db = Database(path)
     store = CredentialStore()
 
-    login = LoginDialog(db)
-    if login.exec() != QDialog.DialogCode.Accepted:
-        db.close()
-        return 0
+    # اگر رمز تنظیم شده و کارفرما خواسته هنگام ورود پرسیده شود
+    needs_login = db.has_app_password() and db.get_setting("require_password", True)
+    if not db.has_app_password():
+        needs_login = True  # بار اول برای ساخت رمز
+
+    if needs_login:
+        login = LoginDialog(db)
+        if login.exec() != QDialog.DialogCode.Accepted:
+            db.close()
+            return 0
 
     window = MainWindow(db, store)
     window.show()

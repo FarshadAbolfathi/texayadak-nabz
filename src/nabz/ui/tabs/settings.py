@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -119,15 +121,28 @@ class SettingsTab(QWidget):
         cred_card.add(self._secure_note)
         layout.addWidget(cred_card)
 
+        # --- امنیت ورود ---
+        security_card = Card("امنیت و ورود")
+        self.require_password = QCheckBox("هنگام باز شدن برنامه رمز بپرسد")
+        security_card.add(self.require_password)
+        security_card.add(muted(
+            "اگر این گزینه خاموش باشد، برنامه بدون پرسیدن رمز باز می‌شود. "
+            "رمز و بازیابی آن همچنان فعال می‌ماند."
+        ))
+        layout.addWidget(security_card)
+
         # --- مسیر منابع ---
         paths_card = Card("مسیر فایل‌های داده (برای سینک خودکار)")
-        self.haseb_path = self._path_row(paths_card, "فایل cal.DBF حاسب",
-                                         "فایل DBF (*.DBF *.dbf)")
+        self.haseb_path = self._path_row(
+            paths_card, "فایل cal.DBF حاسب", "فایل DBF (*.DBF *.dbf)",
+            with_autodetect=True,
+        )
         self.isaco_path = self._path_row(paths_card, "فایل اکسل ایساکو (اختیاری)",
                                          "اکسل (*.xlsx *.xls)")
         paths_card.add(muted(
-            "مسیر cal.DBF معمولاً در پوشهٔ نصب حاسب (DBF2) است. اگر سینک خودکار "
-            "فعال باشد، از این مسیرها می‌خواند."
+            "مسیر cal.DBF معمولاً در پوشهٔ نصب حاسب (DBF2) است. دکمهٔ «یافتن "
+            "خودکار» خودش دنبالش می‌گردد. اگر سینک خودکار فعال باشد، از این "
+            "مسیرها می‌خواند."
         ))
         layout.addWidget(paths_card)
 
@@ -140,7 +155,8 @@ class SettingsTab(QWidget):
 
         outer.addWidget(scrollable(content))
 
-    def _path_row(self, card: Card, label: str, filter_: str) -> QLineEdit:
+    def _path_row(self, card: Card, label: str, filter_: str,
+                  with_autodetect: bool = False) -> QLineEdit:
         line = QLineEdit()
         line.setReadOnly(True)
         line.setPlaceholderText("انتخاب نشده")
@@ -157,10 +173,49 @@ class SettingsTab(QWidget):
         row.setSpacing(10)
         row.addWidget(line, 1)
         row.addWidget(browse)
+
+        if with_autodetect:
+            auto = QPushButton("🔍  یافتن خودکار")
+            auto.setMaximumWidth(150)
+            auto.clicked.connect(lambda: self._autodetect_haseb(line))
+            row.addWidget(auto)
+
         wrapper = QWidget()
         wrapper.setLayout(row)
         card.add(field(label, wrapper))
         return line
+
+    def _autodetect_haseb(self, line: QLineEdit) -> None:
+        from ...discovery import find_haseb_cal
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            results = find_haseb_cal(deep_scan=True)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if not results:
+            QMessageBox.warning(
+                self, "پیدا نشد",
+                "فایل cal.DBF به‌صورت خودکار پیدا نشد. لطفاً با دکمهٔ «انتخاب» "
+                "دستی آن را از پوشهٔ نصب حاسب انتخاب کنید (معمولاً در مسیری "
+                "مانند D:\\rahnama\\HasebmDX8.001\\DBF2).",
+            )
+            return
+
+        if len(results) == 1:
+            line.setText(results[0])
+            QMessageBox.information(self, "پیدا شد", f"فایل پیدا شد:\n{results[0]}")
+            return
+
+        # چند نتیجه: از کاربر بپرس
+        from PySide6.QtWidgets import QInputDialog
+        choice, ok = QInputDialog.getItem(
+            self, "چند فایل پیدا شد", "کدام را استفاده کنم؟ (تازه‌ترین بالاست)",
+            results, 0, False,
+        )
+        if ok and choice:
+            line.setText(choice)
 
     def _load(self) -> None:
         self.markup.setValue(float(self.db.get_setting("markup_percent", 0)))
@@ -169,6 +224,9 @@ class SettingsTab(QWidget):
         self.max_change.setValue(int(self.db.get_setting("max_change_percent", 50)))
         self.max_stock.setValue(int(self.db.get_setting("max_on_site", 2)))
         self.reserve.setValue(int(self.db.get_setting("reserve", 0)))
+        self.require_password.setChecked(
+            bool(self.db.get_setting("require_password", True))
+        )
 
         woo = self.store.load_woo()
         self.woo_url.setText(woo.base_url)
@@ -207,6 +265,7 @@ class SettingsTab(QWidget):
         self.db.set_setting("reserve", self.reserve.value())
         self.db.set_setting("haseb_cal_path", self.haseb_path.text().strip())
         self.db.set_setting("isaco_excel_path", self.isaco_path.text().strip())
+        self.db.set_setting("require_password", self.require_password.isChecked())
 
         self.store.save_woo(WooCredentials(
             base_url=self.woo_url.text().strip(),
