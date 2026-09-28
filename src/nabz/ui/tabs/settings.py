@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from pathlib import Path
+
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -228,17 +230,31 @@ class SettingsTab(QWidget):
             bool(self.db.get_setting("require_password", True))
         )
 
+        # اگر ذخیره‌شده خالی بود، از پیش‌فرض تکسایدک استفاده می‌کنیم
+        from ...defaults import (
+            DEFAULT_HASEB_CAL,
+            DEFAULT_ISACO_PASSWORD,
+            DEFAULT_ISACO_SCUS,
+            DEFAULT_ISACO_USERNAME,
+            DEFAULT_WOO_KEY,
+            DEFAULT_WOO_SECRET,
+            DEFAULT_WOO_URL,
+        )
+
         woo = self.store.load_woo()
-        self.woo_url.setText(woo.base_url)
-        self.woo_key.setText(woo.consumer_key)
-        self.woo_secret.setText(woo.consumer_secret)
+        self.woo_url.setText(woo.base_url or DEFAULT_WOO_URL)
+        self.woo_key.setText(woo.consumer_key or DEFAULT_WOO_KEY)
+        self.woo_secret.setText(woo.consumer_secret or DEFAULT_WOO_SECRET)
 
         isaco = self.store.load_isaco()
-        self.isaco_scus.setText(isaco.scus)
-        self.isaco_user.setText(isaco.username)
-        self.isaco_pass.setText(isaco.password)
+        self.isaco_scus.setText(isaco.scus or DEFAULT_ISACO_SCUS)
+        self.isaco_user.setText(isaco.username or DEFAULT_ISACO_USERNAME)
+        self.isaco_pass.setText(isaco.password or DEFAULT_ISACO_PASSWORD)
 
-        self.haseb_path.setText(self.db.get_setting("haseb_cal_path", ""))
+        haseb = self.db.get_setting("haseb_cal_path", "")
+        if not haseb and Path(DEFAULT_HASEB_CAL).is_file():
+            haseb = DEFAULT_HASEB_CAL
+        self.haseb_path.setText(haseb)
         self.isaco_path.setText(self.db.get_setting("isaco_excel_path", ""))
 
         if self.store.is_secure:

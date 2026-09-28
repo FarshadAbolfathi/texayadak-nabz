@@ -40,6 +40,7 @@ API_ROOT = "/api"
 
 LOGIN_PATH = "Sec/Login/v2"
 PRICE_LIST_EXCEL_PATH = "War/Reports/RepPriceListExcel"
+REPORT_URL_PATH = "Srv/Sec/Public/GetReportUrl/"
 PRICE_SEARCH_PATH = "War/Reports/GetPrcLstWgds"
 VERSION_PATH = "/version.txt"
 
@@ -208,31 +209,38 @@ class IsacoClient:
         return self._parse_body(response.json(), path)
 
     def _parse_body(self, data: Any, path: str) -> dict | list:
-        """پاسخ را رمزگشایی یا از حالت رشته‌ای خارج می‌کند.
+        """پاسخ را رمزگشایی و از لایه‌های تودرتو خارج می‌کند.
 
-        ایساکو سه شکل پاسخ می‌دهد:
-        - ``{data, key}``  →  رمزشده، با کلید خصوصی باز می‌شود.
-        - ``{data: "<json string>"}``  →  رمزنشده (لاگین و خطاها)، فقط
-          باید رشتهٔ JSON داخلش را parse کرد.
-        - JSON معمولی.
+        ایساکو پاسخ را می‌تواند دولایه بدهد:
+        - لایهٔ بیرونی ``{data, key}``  →  رمزشده با AES/RSA، باز می‌شود.
+        - نتیجه ممکن است باز ``{"data": "<json string>"}`` باشد که باید
+          رشتهٔ JSON داخلش هم parse شود.
+        این تابع تا رسیدن به JSON نهایی، لایه‌ها را باز می‌کند.
         """
-        if isinstance(data, dict) and "data" in data:
-            if "key" in data:
-                try:
-                    return decrypt_response(data, self.client_private_key)
-                except IsacoCryptoError as exc:
-                    raise IsacoApiError(
-                        f"رمزگشایی پاسخ {path} شکست خورد: {exc}"
-                    ) from exc
-            inner = data["data"]
-            if isinstance(inner, str):
-                import json as _json
+        if isinstance(data, dict) and "data" in data and "key" in data:
+            try:
+                data = decrypt_response(data, self.client_private_key)
+            except IsacoCryptoError as exc:
+                raise IsacoApiError(
+                    f"رمزگشایی پاسخ {path} شکست خورد: {exc}"
+                ) from exc
+        return self._unwrap(data)
 
+    @staticmethod
+    def _unwrap(obj: Any, _depth: int = 0) -> dict | list:
+        """اگر آبجکت به شکل ``{"data": "<json string>"}`` بود، بازش می‌کند."""
+        import json as _json
+
+        if _depth > 5:
+            return obj
+        if isinstance(obj, dict) and "key" not in obj:
+            inner = obj.get("data")
+            if isinstance(inner, str):
                 try:
-                    return _json.loads(inner)
+                    return IsacoClient._unwrap(_json.loads(inner), _depth + 1)
                 except _json.JSONDecodeError:
-                    return {"data": inner}
-        return data
+                    return obj
+        return obj
 
     # -- لاگین ---------------------------------------------------------
 
@@ -320,44 +328,50 @@ class IsacoClient:
             PRICE_SEARCH_PATH, {"WgdsGds": code8}, authorized=True
         )
 
-    def download_price_list_excel(self, dest: str, params: dict | None = None) -> str:
-        """لیست قیمت را از ایساکو می‌گیرد و به‌صورت فایل اکسل ذخیره می‌کند.
+    def get_report_url(self, report_name: str, params: dict) -> str:
+        """URL گزارش را از سرور گزارش ایساکو می‌گیرد.
 
-        پاسخ endpoint چند شکل ممکن دارد؛ همه را پوشش می‌دهیم:
-        - محتوای باینری اکسل مستقیم
-        - JSON شامل مسیر/نام فایل تولیدشده (که سپس دانلود می‌شود)
-        - JSON شامل محتوای base64
-
-        در صورت هر خطا، استثنای روشن پرتاب می‌شود تا لایهٔ بالاتر به فایل
-        دستی برگردد.
+        برای لیست قیمت: ``report_name="PriceList"``, ``params={"Scus": ...}``.
         """
-        result = self.request_price_list(params)
-
-        # حالت ۱: پاسخ شامل مسیر/نام فایل
+        result = self._post_encrypted(
+            REPORT_URL_PATH,
+            {"reportName": report_name, "params": params},
+            authorized=True,
+        )
+        if isinstance(result, dict) and result.get("Data"):
+            return str(result["Data"])
+        message = ""
         if isinstance(result, dict):
-            data = result.get("Data") if isinstance(result.get("Data"), (dict, str)) else result
-            file_ref = None
-            if isinstance(data, dict):
-                for key in ("File", "FilePath", "Path", "Url", "FileName", "file", "url"):
-                    if data.get(key):
-                        file_ref = str(data[key])
-                        break
-                # حالت ۳: محتوای base64
-                for key in ("Base64", "Content", "FileContent", "base64"):
-                    if data.get(key):
-                        import base64
-                        with open(dest, "wb") as handle:
-                            handle.write(base64.b64decode(data[key]))
-                        return dest
-            elif isinstance(data, str) and data.lower().endswith((".xlsx", ".xls")):
-                file_ref = data
+            message = result.get("MessageDes", "")
+        raise IsacoApiError(f"دریافت URL گزارش شکست خورد. {message}")
 
-            if file_ref:
-                return self.download_file(file_ref, dest)
+    def download_price_list_excel(self, dest: str, scus: str | None = None) -> str:
+        """لیست قیمت را از سرور گزارش ایساکو می‌گیرد و ذخیره می‌کند.
+
+        فلو: ``GetReportUrl`` → یک URL روی سرور گزارش (b2brep) → دانلود فایل.
+        اگر سرور گزارش فایل معتبر ندهد، استثنای روشن پرتاب می‌شود تا لایهٔ
+        بالاتر به فایل دستی برگردد.
+        """
+        scus = scus or (self.auth.scus if self.auth else "")
+        url = self.get_report_url("PriceList", {"Scus": scus})
+
+        response = self._session.get(
+            url,
+            headers={"Authorization": self.auth.token} if self.auth else {},
+            timeout=self.timeout,
+            allow_redirects=True,
+        )
+        content = response.content
+        # فایل اکسل با امضای ZIP (PK) شروع می‌شود
+        if content[:2] == b"PK":
+            with open(dest, "wb") as handle:
+                handle.write(content)
+            return dest
 
         raise IsacoApiError(
-            "ساختار پاسخ دانلود اکسل ایساکو شناخته نشد. "
-            "لطفاً فایل را دستی از پورتال دانلود کنید یا با پشتیبانی تماس بگیرید."
+            "سرور گزارش ایساکو فایل اکسل معتبر برنگرداند "
+            f"({response.headers.get('Content-Type', '')}, {len(content)} بایت). "
+            "لطفاً فایل را دستی از پورتال دانلود کنید."
         )
 
     def download_file(self, url_or_path: str, dest: str) -> str:

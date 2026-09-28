@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..widgets import Card, muted
+from ..widgets import Card, muted, scrollable
 
 # اطلاعات سازنده
 DEVELOPER_NAME = "Farshad Abolfathi"
@@ -26,9 +26,14 @@ WHATSAPP_URL = "https://wa.me/989127259609"
 class SupportTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(22, 22, 22, 22)
         layout.setSpacing(16)
+        self._outer = outer
+        self._content = content
 
         card = Card("پشتیبانی و ارتباط با سازنده")
         card.add(muted(
@@ -65,10 +70,6 @@ class SupportTab(QWidget):
         version.setStyleSheet("font-weight: bold; color: #1f6feb;")
         version.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         about.add(version)
-        about.add(muted(
-            "برای اطمینان از داشتن آخرین نسخه، این شمارهٔ build را با شمارهٔ "
-            "آخرین نسخه در صفحهٔ دانلود مقایسه کنید."
-        ))
         layout.addWidget(about)
 
         # --- لاگ برای دیباگ ---
@@ -98,10 +99,13 @@ class SupportTab(QWidget):
             "font-family: 'Consolas', monospace; font-size: 12px;"
         )
         self._log_view.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        # خطوط لاگ بلندند؛ به‌جای شکستن، اسکرول افقی می‌گذاریم
+        self._log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         log_card.add(self._log_view)
         layout.addWidget(log_card)
 
         layout.addStretch(1)
+        outer.addWidget(scrollable(content))
 
     def _show_log(self) -> None:
         from ...logging_setup import read_recent_log

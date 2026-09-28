@@ -33,6 +33,7 @@ def run(db_path: str | Path | None = None) -> int:
     path = Path(db_path) if db_path else default_db_path()
     db = Database(path)
     store = CredentialStore()
+    _seed_defaults(db, store)
 
     # اگر رمز تنظیم شده و کارفرما خواسته هنگام ورود پرسیده شود
     needs_login = db.has_app_password() and db.get_setting("require_password", True)
@@ -50,6 +51,38 @@ def run(db_path: str | Path | None = None) -> int:
     code = app.exec()
     db.close()
     return code
+
+
+def _seed_defaults(db, store) -> None:
+    """بار اول، اعتبارنامه‌های پیش‌فرض تکسایدک را ذخیره می‌کند تا برنامه
+    بدون تنظیم دستی کار کند."""
+    from pathlib import Path as _Path
+
+    from ..config import IsacoCredentialsConfig, WooCredentials
+    from ..defaults import (
+        DEFAULT_HASEB_CAL,
+        DEFAULT_ISACO_PASSWORD,
+        DEFAULT_ISACO_SCUS,
+        DEFAULT_ISACO_USERNAME,
+        DEFAULT_WOO_KEY,
+        DEFAULT_WOO_SECRET,
+        DEFAULT_WOO_URL,
+    )
+
+    if not store.load_woo().base_url:
+        store.save_woo(WooCredentials(
+            base_url=DEFAULT_WOO_URL,
+            consumer_key=DEFAULT_WOO_KEY,
+            consumer_secret=DEFAULT_WOO_SECRET,
+        ))
+    if not store.load_isaco().scus:
+        store.save_isaco(IsacoCredentialsConfig(
+            scus=DEFAULT_ISACO_SCUS,
+            username=DEFAULT_ISACO_USERNAME,
+            password=DEFAULT_ISACO_PASSWORD,
+        ))
+    if not db.get_setting("haseb_cal_path") and _Path(DEFAULT_HASEB_CAL).is_file():
+        db.set_setting("haseb_cal_path", DEFAULT_HASEB_CAL)
 
 
 def main() -> None:

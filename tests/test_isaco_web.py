@@ -201,6 +201,24 @@ class TestLogin:
         with pytest.raises(IsacoLoginError, match="توکن دریافت نشد"):
             client.login(IsacoCredentials(scus="1", username="2", password="3"))
 
+    def test_double_wrapped_response_is_unwrapped(self, keys):
+        """پاسخ دولایه: بعد از رمزگشایی، ``{"data": "<json string>"}`` که باید
+        باز هم parse شود. (باگ واقعی که لاگین کارفرما را می‌شکست.)"""
+        import json as _json
+        token = make_jwt()
+        inner = _json.dumps({"Data": {"Token": token, "Scus": "1234567"},
+                             "Success": True})
+        server = FakeIsacoServer(keys, {
+            # سرور یک لایهٔ رشته‌ای اضافه می‌گذارد
+            "Sec/Login/v2": {"data": inner},
+        })
+        client = IsacoClient(keys["client_priv"],
+                             server_public_key=keys["server_pub"],
+                             session=FakeSession(server))
+        session = client.login(IsacoCredentials(scus="1", username="2", password="3"))
+        assert session.token == token
+        assert session.scus == "1234567"
+
     def test_authorized_call_includes_token_header(self, keys):
         token = make_jwt()
         server = FakeIsacoServer(keys, {

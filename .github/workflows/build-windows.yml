@@ -69,6 +69,29 @@ jobs:
           "@
           Set-Content -Path "src/nabz/build_info.py" -Value $content -Encoding utf8
 
+      - name: تزریق پیش‌فرض اتصال‌ها از Secrets
+        shell: pwsh
+        env:
+          WOO_URL: ${{ secrets.WOO_URL }}
+          WOO_KEY: ${{ secrets.WOO_KEY }}
+          WOO_SECRET: ${{ secrets.WOO_SECRET }}
+          ISACO_SCUS: ${{ secrets.ISACO_SCUS }}
+          ISACO_USERNAME: ${{ secrets.ISACO_USERNAME }}
+          ISACO_PASSWORD: ${{ secrets.ISACO_PASSWORD }}
+        run: |
+          $content = @"
+          from __future__ import annotations
+
+          DEFAULT_WOO_URL = "$env:WOO_URL"
+          DEFAULT_WOO_KEY = "$env:WOO_KEY"
+          DEFAULT_WOO_SECRET = "$env:WOO_SECRET"
+          DEFAULT_ISACO_SCUS = "$env:ISACO_SCUS"
+          DEFAULT_ISACO_USERNAME = "$env:ISACO_USERNAME"
+          DEFAULT_ISACO_PASSWORD = "$env:ISACO_PASSWORD"
+          DEFAULT_HASEB_CAL = r"D:\rahnama\HasebmDX8.001\DBF2\cal.DBF"
+          "@
+          Set-Content -Path "src/nabz/defaults.py" -Value $content -Encoding utf8
+
       - name: ساخت فایل اجرایی با PyInstaller
         run: pyinstaller packaging/nabz.spec
 
