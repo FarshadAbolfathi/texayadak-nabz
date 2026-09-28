@@ -122,15 +122,17 @@ class CompareWorker(QObject):
         return load_haseb(haseb_path, warehouses=wh)
 
 
-class ApplyWorker(QObject):
+class TableApplyWorker(QObject):
+    """به‌روزرسانی‌های ساخته‌شده از جدول را اعمال و برای رول‌بک ثبت می‌کند."""
+
     progress = Signal(str)
-    done = Signal(object)
+    done = Signal(object)      # (تعداد موفق، تعداد خطا)
     failed = Signal(str)
 
-    def __init__(self, db, store, plan, include_price, include_stock):
+    def __init__(self, db, store, updates, snapshots, mode="manual"):
         super().__init__()
-        self.db, self.store, self.plan = db, store, plan
-        self.include_price, self.include_stock = include_price, include_stock
+        self.db, self.store = db, store
+        self.updates, self.snapshots, self.mode = updates, snapshots, mode
 
     def run(self) -> None:
         try:
@@ -139,11 +141,22 @@ class ApplyWorker(QObject):
             if woo is None:
                 self.failed.emit("اطلاعات اتصال ووکامرس کامل نیست.")
                 return
-            result = apply_plan(
-                self.plan, woo, self.db, mode="manual",
-                include_price=self.include_price, include_stock=self.include_stock,
+            run_id = self.db.start_run(self.mode)
+            outcome = woo.batch_update(self.updates)
+            applied = set(outcome.updated)
+            for snap in self.snapshots:
+                snap.applied = snap.product_id in applied
+            self.db.record_snapshots(run_id, self.snapshots)
+            self.db.finish_run(
+                run_id, "done",
+                {"applied": len(applied), "failed": len(outcome.failed)},
             )
-            self.done.emit(result)
+            self.db.log(
+                "info",
+                f"اعمال {self.mode}: {len(applied)} محصول، {len(outcome.failed)} خطا.",
+                run_id=run_id,
+            )
+            self.done.emit((len(applied), len(outcome.failed)))
         except Exception as exc:  # noqa: BLE001
             _log.exception("خطا در اعمال سینک")
             self.failed.emit(str(exc))
@@ -153,7 +166,10 @@ class SyncTab(QWidget):
     finished_apply = Signal()
 
     HEADERS = ["کد (SKU)", "نام محصول", "قیمت فعلی", "قیمت جدید",
-               "موجودی فعلی", "موجودی جدید", "وضعیت"]
+               "موجودی فعلی", "موجودی جدید", "وضعیت", "اعمال"]
+    # ستون‌های قابل‌ویرایش: قیمت جدید و موجودی جدید
+    COL_SKU, COL_NAME, COL_CUR_PRICE, COL_NEW_PRICE = 0, 1, 2, 3
+    COL_CUR_STOCK, COL_NEW_STOCK, COL_STATUS, COL_APPLY = 4, 5, 6, 7
 
     def __init__(self, db: Database, store: CredentialStore, parent=None):
         super().__init__(parent)
@@ -212,15 +228,22 @@ class SyncTab(QWidget):
         self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setAlternatingRowColors(True)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # فقط با دابل‌کلیک قابل ویرایش (تا اتفاقی تغییر نکند)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch
+            self.COL_NAME, QHeaderView.ResizeMode.Stretch
         )
         layout.addWidget(self.table, 1)
+        hint = muted(
+            "برای ویرایش «قیمت جدید» یا «موجودی جدید» روی خانه دابل‌کلیک کنید. "
+            "دکمهٔ «اعمال» فقط همان محصول را روی سایت می‌گذارد."
+        )
+        layout.addWidget(hint)
 
         self._manual_path: str | None = None
+        self._row_items: list = []  # نگاشت شمارهٔ ردیف → SyncItem
 
     def _pick_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -284,48 +307,121 @@ class SyncTab(QWidget):
 
     def _fill_table(self, plan: SyncPlan) -> None:
         rows = [i for i in plan.items if i.changes or i.needs_review]
+        self._row_items = rows
         self.table.setRowCount(len(rows))
         for r, item in enumerate(rows):
             review = item.needs_review
-            cells = [
-                item.sku,
-                item.name,
-                self._money(item.current_price),
-                self._money(item.new_price),
-                self._num(item.current_stock),
-                self._num(item.new_stock),
-                "بررسی شود" if review else "آماده",
-            ]
-            for c, text in enumerate(cells):
+            # مقادیر خام (عدد) برای ستون‌های ویرایش‌پذیر، تا ذخیره ساده باشد
+            new_price_raw = "" if item.new_price is None else str(item.new_price)
+            new_stock_raw = "" if item.new_stock is None else str(item.new_stock)
+            cells = {
+                self.COL_SKU: item.sku,
+                self.COL_NAME: item.name,
+                self.COL_CUR_PRICE: self._money(item.current_price),
+                self.COL_NEW_PRICE: new_price_raw,
+                self.COL_CUR_STOCK: self._num(item.current_stock),
+                self.COL_NEW_STOCK: new_stock_raw,
+                self.COL_STATUS: "بررسی شود" if review else "آماده",
+            }
+            for c, text in cells.items():
                 cell = QTableWidgetItem(text)
-                if c not in (1,):
+                if c != self.COL_NAME:
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if review:
                     cell.setBackground(QBrush(QColor("#fff8e1")))
+                # فقط قیمت/موجودی جدید قابل ویرایش‌اند
+                if c not in (self.COL_NEW_PRICE, self.COL_NEW_STOCK):
+                    cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(r, c, cell)
 
+            # دکمهٔ اعمال تکی برای همین ردیف
+            btn = QPushButton("اعمال")
+            btn.setObjectName("Primary")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, row=r: self._apply_single(row))
+            self.table.setCellWidget(r, self.COL_APPLY, btn)
+
+    def _collect_rows(self, row_indices: list[int]):
+        """از ردیف‌های جدول، به‌روزرسانی ووکامرس و snapshot رول‌بک می‌سازد.
+
+        مقادیر «قیمت جدید» و «موجودی جدید» از خودِ جدول خوانده می‌شوند تا
+        ویرایش‌های دستی کاربر لحاظ شوند.
+        """
+        from ...db import Snapshot
+
+        updates, snapshots = [], []
+        for r in row_indices:
+            if r >= len(self._row_items):
+                continue
+            item = self._row_items[r]
+            # ردیف‌های نیازمند بررسی فقط با تأیید صریح کاربر اعمال شوند
+            new_price = self.table.item(r, self.COL_NEW_PRICE).text().strip()
+            new_stock = self.table.item(r, self.COL_NEW_STOCK).text().strip()
+            old_price = "" if item.current_price is None else str(item.current_price)
+            old_stock = item.current_stock
+
+            payload = {"id": item.product_id}
+            snap = Snapshot(product_id=item.product_id, sku=item.sku,
+                            old_price=old_price or None, old_stock=old_stock,
+                            old_status="instock" if old_stock else "outofstock")
+
+            if new_price and new_price != old_price:
+                payload["regular_price"] = new_price
+                snap.new_price = new_price
+
+            old_stock_s = "" if old_stock is None else str(old_stock)
+            if new_stock != old_stock_s and new_stock != "":
+                try:
+                    q = int(float(new_stock))
+                    payload["manage_stock"] = True
+                    payload["stock_quantity"] = q
+                    payload["stock_status"] = "instock" if q > 0 else "outofstock"
+                    snap.new_stock = q
+                    snap.new_status = payload["stock_status"]
+                except ValueError:
+                    pass
+
+            if len(payload) > 1:
+                updates.append(payload)
+                snapshots.append(snap)
+        return updates, snapshots
+
     def _apply(self) -> None:
-        if not self._plan:
-            return
         confirm = QMessageBox.question(
             self, "اعمال روی سایت",
-            "تغییرات روی سایت اعمال شوند؟ (قابل بازگشت است)",
+            "همهٔ تغییرات روی سایت اعمال شوند؟ (قابل بازگشت است)",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
+        rows = list(range(self.table.rowCount()))
+        self._apply_rows(rows, mode="manual")
+
+    def _apply_single(self, row: int) -> None:
+        updates, snapshots = self._collect_rows([row])
+        if not updates:
+            QMessageBox.information(self, "تغییری نیست",
+                                    "این محصول تغییری برای اعمال ندارد.")
+            return
+        self._apply_rows([row], mode="manual", silent=True)
+
+    def _apply_rows(self, row_indices: list[int], mode="manual",
+                    silent: bool = False) -> None:
+        updates, snapshots = self._collect_rows(row_indices)
+        if not updates:
+            QMessageBox.information(self, "تغییری نیست", "تغییری برای اعمال نیست.")
+            return
         self._set_busy(True)
-        worker = ApplyWorker(self.db, self.store, self._plan,
-                             self._inc_price, self._inc_stock)
+        worker = TableApplyWorker(self.db, self.store, updates, snapshots, mode)
         self._run_worker(worker, self._on_applied)
 
     def _on_applied(self, result) -> None:
+        applied, failed = result
         self._set_busy(False)
-        msg = f"{self._fa(result.applied_count)} محصول به‌روز شد."
-        if result.outcome.failed:
-            msg += f"\n{self._fa(len(result.outcome.failed))} خطا."
+        msg = f"{self._fa(applied)} محصول به‌روز شد."
+        if failed:
+            msg += f"\n{self._fa(failed)} خطا."
         QMessageBox.information(self, "انجام شد", msg)
-        self.apply_btn.setEnabled(False)
         self.finished_apply.emit()
 
     def do_rollback(self, run_id: int) -> None:

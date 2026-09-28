@@ -156,6 +156,10 @@ class IsacoDownloader:
         profile = page.profile()
 
         def on_download(item):
+            # اگر این دانلودر کارش تمام شده، دست نگه دار (جلوگیری از تداخل
+            # handler های قبلی که هنوز به profile مشترک وصل‌اند)
+            if self._done or self._result_path:
+                return
             item.setDownloadDirectory(str(dest_path.parent))
             item.setDownloadFileName(dest_path.name)
             item.accept()
@@ -171,7 +175,7 @@ class IsacoDownloader:
 
         profile.downloadRequested.connect(on_download)
 
-        state = {"phase": "login", "clicked": False}
+        state = {"auth_checked": False, "clicked": False, "on_pricelist": False}
 
         def fail(msg: str) -> None:
             if not self._done:
@@ -181,28 +185,49 @@ class IsacoDownloader:
 
         def on_load_finished(ok: bool) -> None:
             url = view.url().toString()
-            _log.info("صفحه: %s (phase=%s ok=%s)", url, state["phase"], ok)
+            _log.info("صفحه: %s (clicked=%s ok=%s)", url, state["clicked"], ok)
 
-            if state["phase"] == "login" and url.rstrip("/") == BASE_URL:
+            if "PriceList" in url:
+                if not state["clicked"]:
+                    state["clicked"] = True
+                    self._emit("در حال باز کردن لیست قیمت ...")
+                    QTimer.singleShot(8000, try_click_excel)
+                return
+
+            # هر صفحهٔ دیگری (لاگین یا home): یک‌بار وضعیت ورود را چک کن
+            if not state["auth_checked"]:
+                state["auth_checked"] = True
+                # کمی صبر تا React فرم را render کند، سپس چک کن
+                QTimer.singleShot(2500, check_auth)
+
+        def check_auth() -> None:
+            page.runJavaScript(
+                "!!document.querySelector('#Password')", handle_auth_check
+            )
+
+        def handle_auth_check(has_login_form) -> None:
+            if has_login_form:
                 self._emit("در حال ورود به ایساکو ...")
-                state["phase"] = "logging_in"
                 page.runJavaScript(
                     _js_fill_login(self.scus, self.username, self.password),
                     handle_login_result,
                 )
-            elif "PriceList" in url and not state["clicked"]:
-                state["clicked"] = True
-                self._emit("در حال باز کردن لیست قیمت ...")
-                # صبر برای بارگذاری دادهٔ صفحه، سپس کلیک دکمهٔ اکسل
-                QTimer.singleShot(8000, try_click_excel)
+            else:
+                # از قبل وارد شده‌ایم؛ مستقیم به لیست قیمت برو
+                self._emit("در حال رفتن به لیست قیمت ...")
+                go_to_pricelist()
+
+        def go_to_pricelist() -> None:
+            if not state["on_pricelist"]:
+                state["on_pricelist"] = True
+                view.setUrl(QUrl(PRICELIST_URL))
 
         def handle_login_result(result) -> None:
             if result != "ok":
                 fail(f"ورود ناموفق: {result} (یوزر/رمز/کد نمایندگی را بررسی کنید)")
                 return
             self._emit("ورود انجام شد، در حال رفتن به لیست قیمت ...")
-            state["phase"] = "pricelist"
-            QTimer.singleShot(4000, lambda: view.setUrl(QUrl(PRICELIST_URL)))
+            QTimer.singleShot(4000, go_to_pricelist)
 
         def try_click_excel() -> None:
             self._emit("در حال کلیک روی دکمهٔ دانلود اکسل ...")
@@ -223,6 +248,11 @@ class IsacoDownloader:
         QTimer.singleShot(timeout_s * 1000, lambda: fail("زمان دانلود به پایان رسید"))
 
         loop.exec()
+        # قطع handler از profile مشترک تا در دانلود بعدی تداخل نکند
+        try:
+            profile.downloadRequested.disconnect(on_download)
+        except (RuntimeError, TypeError):
+            pass
         view.deleteLater()
         for pv in popup_views:
             pv.deleteLater()
