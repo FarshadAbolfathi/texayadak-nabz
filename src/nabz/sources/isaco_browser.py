@@ -29,8 +29,9 @@ SEL_SCUS = "#Scus"
 SEL_USERNAME = "#UserName"
 SEL_PASSWORD = "#Password"
 SEL_LOGIN_SUBMIT = 'form input[type="submit"]'
-# دکمهٔ گزارش اکسل در صفحهٔ لیست قیمت
-SEL_EXCEL_BUTTON = "button.k-button-icontext .k-i-excel"
+# دکمهٔ گزارش اکسل در صفحهٔ لیست قیمت (دو راه: آیکون اکسل، و مسیر صفحه)
+SEL_EXCEL_ICON = ".k-icon.k-i-excel"
+SEL_EXCEL_PATH = "#root > div > div.sc-Rmtcm.fnmBum > div > div > div:nth-child(4) button"
 
 #: بیشترین زمان انتظار برای هر مرحله (میلی‌ثانیه)
 STEP_TIMEOUT_MS = 40_000
@@ -72,21 +73,28 @@ def _js_fill_login(scus: str, username: str, password: str) -> str:
 
 
 def _js_click_excel() -> str:
-    """جاوااسکریپت کلیک روی دکمهٔ دانلود اکسل لیست قیمت."""
+    """جاوااسکریپت کلیک روی دکمهٔ دانلود اکسل لیست قیمت.
+
+    سه راه برای یافتن دکمه: آیکون اکسل، مسیر صفحه، و جستجوی متنی.
+    کلاس ``btn-disabled`` گاهی ظاهری است؛ اگر دکمه پیدا شد، کلیک می‌کنیم.
+    """
     import json
 
     return f"""
     (function() {{
-        var icon = document.querySelector({json.dumps(SEL_EXCEL_BUTTON)});
-        var btn = icon ? icon.closest('button') : null;
+        var btn = null;
+        var icon = document.querySelector({json.dumps(SEL_EXCEL_ICON)});
+        if (icon) btn = icon.closest('button');
+        if (!btn) btn = document.querySelector({json.dumps(SEL_EXCEL_PATH)});
         if (!btn) {{
-            // جستجوی جایگزین بر اساس متن
             var buttons = Array.prototype.slice.call(document.querySelectorAll('button'));
             btn = buttons.find(function(b) {{ return b.textContent.indexOf('excel') > -1
                 || b.textContent.indexOf('اکسل') > -1; }});
         }}
         if (!btn) return 'excel-button-not-found';
-        if (btn.disabled || btn.className.indexOf('btn-disabled') > -1) return 'excel-button-disabled';
+        // برخی نسخه‌ها disabled ظاهری دارند؛ محدودیت را برمی‌داریم و کلیک می‌کنیم
+        btn.disabled = false;
+        btn.classList.remove('btn-disabled');
         btn.click();
         return 'ok';
     }})();
@@ -113,100 +121,111 @@ class IsacoDownloader:
         _log.info(message)
         self._progress(message)
 
-    def download(self, dest: str, timeout_s: int = 180) -> str:
-        """کل فرایند را اجرا می‌کند و مسیر فایل دانلودشده را برمی‌گرداند."""
+    def download(self, dest: str, timeout_s: int = 240) -> str:
+        """کل فرایند را اجرا می‌کند و مسیر فایل دانلودشده را برمی‌گرداند.
+
+        مراحل: ورود → صفحهٔ لیست قیمت → کلیک دکمهٔ اکسل → یک پنجرهٔ گزارش
+        (b2brep) باز می‌شود که پس از رندر شدن گزارش (چند ده ثانیه برای ۴۶
+        هزار ردیف) خودکار فایل را دانلود می‌کند. آن دانلود گرفته و ذخیره
+        می‌شود.
+        """
         from PySide6.QtCore import QEventLoop, QTimer, QUrl
-        from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+        from PySide6.QtWebEngineCore import QWebEnginePage
         from PySide6.QtWebEngineWidgets import QWebEngineView
 
         dest_path = Path(dest)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
         loop = QEventLoop()
-        view = QWebEngineView()
-        profile = view.page().profile()
+        # پنجرهٔ گزارش که با کلیک باز می‌شود باید یک view واقعی داشته باشد،
+        # وگرنه دانلود اجرا نمی‌شود.
+        popup_views: list = []
 
-        # مدیریت دانلود: فایل را در مقصد ذخیره کن
+        downloader = self  # برای دسترسی در closure
+
+        class MainPage(QWebEnginePage):
+            def createWindow(self, _window_type):
+                downloader._emit("در حال آماده‌سازی گزارش (چند لحظه صبر کنید) ...")
+                popup_view = QWebEngineView()
+                popup_views.append(popup_view)
+                return popup_view.page()
+
+        view = QWebEngineView()
+        page = MainPage(view.page().profile(), view)
+        view.setPage(page)
+        profile = page.profile()
+
         def on_download(item):
-            try:
-                item.setDownloadDirectory(str(dest_path.parent))
-                item.setDownloadFileName(dest_path.name)
-            except Exception:  # نسخه‌های قدیمی‌تر API
-                item.setPath(str(dest_path))
+            item.setDownloadDirectory(str(dest_path.parent))
+            item.setDownloadFileName(dest_path.name)
             item.accept()
+            self._emit("در حال دانلود فایل لیست قیمت ...")
 
             def finished():
-                self._result_path = str(dest_path)
-                self._done = True
-                loop.quit()
+                if item.isFinished():
+                    self._result_path = str(dest_path)
+                    self._done = True
+                    loop.quit()
 
-            item.isFinishedChanged.connect(
-                lambda: finished() if item.isFinished() else None
-            )
-            # بعضی نسخه‌ها سیگنال دیگری دارند
-            try:
-                item.stateChanged.connect(
-                    lambda s: finished() if int(s) == 2 else None
-                )
-            except Exception:
-                pass
+            item.isFinishedChanged.connect(finished)
 
         profile.downloadRequested.connect(on_download)
 
-        # زمان‌بندی مراحل
-        state = {"phase": "login"}
+        state = {"phase": "login", "clicked": False}
 
         def fail(msg: str) -> None:
-            self._error = msg
-            self._done = True
-            loop.quit()
+            if not self._done:
+                self._error = msg
+                self._done = True
+                loop.quit()
 
         def on_load_finished(ok: bool) -> None:
-            if not ok:
-                return  # بعضی بارگذاری‌های میانی ممکن است ok=False باشند
             url = view.url().toString()
-            _log.info("صفحه بارگذاری شد: %s (phase=%s)", url, state["phase"])
+            _log.info("صفحه: %s (phase=%s ok=%s)", url, state["phase"], ok)
 
             if state["phase"] == "login" and url.rstrip("/") == BASE_URL:
                 self._emit("در حال ورود به ایساکو ...")
                 state["phase"] = "logging_in"
-                view.page().runJavaScript(
+                page.runJavaScript(
                     _js_fill_login(self.scus, self.username, self.password),
                     handle_login_result,
                 )
+            elif "PriceList" in url and not state["clicked"]:
+                state["clicked"] = True
+                self._emit("در حال باز کردن لیست قیمت ...")
+                # صبر برای بارگذاری دادهٔ صفحه، سپس کلیک دکمهٔ اکسل
+                QTimer.singleShot(8000, try_click_excel)
 
         def handle_login_result(result) -> None:
             if result != "ok":
-                fail(f"پر کردن فرم لاگین ناموفق: {result}")
+                fail(f"ورود ناموفق: {result} (یوزر/رمز/کد نمایندگی را بررسی کنید)")
                 return
             self._emit("ورود انجام شد، در حال رفتن به لیست قیمت ...")
             state["phase"] = "pricelist"
-            # کمی صبر تا لاگین کامل شود، سپس به لیست قیمت برو
             QTimer.singleShot(4000, lambda: view.setUrl(QUrl(PRICELIST_URL)))
-            QTimer.singleShot(9000, try_click_excel)
 
         def try_click_excel() -> None:
             self._emit("در حال کلیک روی دکمهٔ دانلود اکسل ...")
-            view.page().runJavaScript(_js_click_excel(), handle_excel_result)
+            page.runJavaScript(_js_click_excel(), handle_excel_result)
 
         def handle_excel_result(result) -> None:
             if result == "ok":
-                self._emit("دانلود آغاز شد ...")
+                self._emit(
+                    "گزارش در حال آماده‌سازی است؛ برای ۴۶ هزار قلم ممکن است "
+                    "تا یک دقیقه طول بکشد ..."
+                )
                 return  # منتظر رویداد دانلود می‌مانیم
-            if result == "excel-button-disabled":
-                # شاید هنوز صفحه آماده نیست؛ یک بار دیگر امتحان کن
-                QTimer.singleShot(5000, try_click_excel)
-                return
-            fail(f"دکمهٔ دانلود اکسل: {result}")
+            fail(f"دکمهٔ دانلود اکسل پیدا نشد: {result}")
 
         view.loadFinished.connect(on_load_finished)
         view.setUrl(QUrl(LOGIN_URL))
 
-        # محافظ زمان کلی
         QTimer.singleShot(timeout_s * 1000, lambda: fail("زمان دانلود به پایان رسید"))
 
         loop.exec()
         view.deleteLater()
+        for pv in popup_views:
+            pv.deleteLater()
 
         if self._error:
             raise IsacoBrowserError(self._error)
