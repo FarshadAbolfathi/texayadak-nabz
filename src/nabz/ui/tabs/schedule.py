@@ -24,6 +24,7 @@ from ..widgets import Card, muted, scrollable
 
 class ScheduleTab(QWidget):
     schedule_changed = Signal()
+    run_now_requested = Signal()
 
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
@@ -62,9 +63,11 @@ class ScheduleTab(QWidget):
 
         card.body().addLayout(form)
         card.add(muted(
-            "در ساعت تعیین‌شده، برنامه به‌صورت خودکار قیمت و موجودی را به‌روز "
-            "می‌کند. اگر در آن لحظه سیستم خاموش باشد، در اولین فرصت روشن‌شدن "
-            "اجرا می‌شود. برای اجرای خودکار، برنامه باید در حال اجرا (یا در "
+            "در ساعت تعیین‌شده، برنامه به‌صورت خودکار لیست قیمت را از ایساکو "
+            "دانلود می‌کند، موجودی را از حاسب می‌خواند و روی سایت اعمال "
+            "می‌کند — کاملاً بدون نیاز به باز کردن برنامه. اگر در آن لحظه "
+            "سیستم خاموش باشد، در اولین فرصت روشن‌شدن اجرا می‌شود. برای "
+            "اجرای خودکار، فقط لازم است برنامه در حال اجرا (یا در "
             "System Tray) باشد."
         ))
         layout.addWidget(card)
@@ -74,6 +77,19 @@ class ScheduleTab(QWidget):
         save.setMinimumHeight(46)
         save.clicked.connect(self._save)
         layout.addWidget(save)
+
+        test_card = Card("آزمایش زمان‌بندی")
+        test_card.add(muted(
+            "برای اطمینان از اینکه سینک خودکار درست کار می‌کند، بدون نیاز "
+            "به صبر کردن تا ساعت تعیین‌شده، همین حالا آن را اجرا کنید. "
+            "دقیقاً همان کاری انجام می‌شود که زمان‌بندی شبانه انجام می‌دهد."
+        ))
+        run_now = QPushButton("▶️  تست همین حالا")
+        run_now.setObjectName("Accent")
+        run_now.clicked.connect(self._run_now)
+        test_card.add(run_now)
+        layout.addWidget(test_card)
+
         layout.addStretch(1)
         outer.addWidget(scrollable(content))
 
@@ -92,3 +108,6 @@ class ScheduleTab(QWidget):
         self.db.set_setting("schedule_stock", self.sync_stock.isChecked())
         self.schedule_changed.emit()
         QMessageBox.information(self, "ذخیره شد", "تنظیمات زمان‌بندی ذخیره شد.")
+
+    def _run_now(self) -> None:
+        self.run_now_requested.emit()

@@ -4,9 +4,14 @@ from decimal import Decimal
 
 import pytest
 
-from nabz.config import CredentialStore, MemoryBackend, WooCredentials
+from nabz.config import (
+    CredentialStore,
+    IsacoCredentialsConfig,
+    MemoryBackend,
+    WooCredentials,
+)
 from nabz.db import Database
-from nabz.jobs import run_auto_sync
+from nabz.jobs import run_auto_sync, try_auto_download_isaco
 from nabz.targets.woocommerce import BatchOutcome, WooClient, WooProduct
 from tests.conftest import write_dbf, CAL_FIELDS
 
@@ -107,3 +112,97 @@ class TestNoWoo:
         result = run_auto_sync(db, empty_store)
         assert not result.ok
         assert "ووکامرس" in result.message
+
+
+class TestAutoDownload:
+    """این توابع باید روی نخ اصلی Qt فراخوانی شوند (QWebEngineView)؛
+    اینجا فقط منطقِ فراخوانی/فالبک تست می‌شود، بدون تماس شبکه‌ای واقعی."""
+
+    def test_no_isaco_credentials_returns_none_without_import(self, db):
+        empty_store = CredentialStore(backend=MemoryBackend())
+        # نباید حتی سعی کند isaco_browser را import کند
+        assert try_auto_download_isaco(db, empty_store) is None
+
+    def test_download_failure_returns_none_and_does_not_raise(self, db, monkeypatch):
+        store = CredentialStore(backend=MemoryBackend())
+        store.save_isaco(IsacoCredentialsConfig(
+            scus="1", username="2", password="3"))
+
+        class BoomDownloader:
+            def __init__(self, *a, **k):
+                pass
+
+            def download(self, dest, timeout_s=240):
+                raise RuntimeError("شبکه در دسترس نیست")
+
+        monkeypatch.setattr(
+            "nabz.sources.isaco_browser.IsacoDownloader", BoomDownloader
+        )
+        assert try_auto_download_isaco(db, store) is None
+        # تنظیمات نباید با مسیر نامعتبر خراب شده باشد
+        assert db.get_setting("isaco_excel_path") is None
+
+    def test_successful_download_saves_path_setting(self, db, monkeypatch, tmp_path):
+        store = CredentialStore(backend=MemoryBackend())
+        store.save_isaco(IsacoCredentialsConfig(
+            scus="1", username="2", password="3"))
+        fake_file = tmp_path / "downloaded.xlsx"
+        fake_file.write_bytes(b"fake")
+
+        class FakeDownloader:
+            def __init__(self, *a, **k):
+                pass
+
+            def download(self, dest, timeout_s=240):
+                return str(fake_file)
+
+        monkeypatch.setattr(
+            "nabz.sources.isaco_browser.IsacoDownloader", FakeDownloader
+        )
+        result = try_auto_download_isaco(db, store)
+        assert result == str(fake_file)
+        assert db.get_setting("isaco_excel_path") == str(fake_file)
+
+    def test_progress_callback_is_forwarded(self, db, monkeypatch):
+        store = CredentialStore(backend=MemoryBackend())
+        store.save_isaco(IsacoCredentialsConfig(
+            scus="1", username="2", password="3"))
+        seen = []
+
+        class FakeDownloader:
+            def __init__(self, scus, username, password, on_progress=None):
+                self.on_progress = on_progress
+
+            def download(self, dest, timeout_s=240):
+                self.on_progress("در حال کار ...")
+                return dest
+
+        monkeypatch.setattr(
+            "nabz.sources.isaco_browser.IsacoDownloader", FakeDownloader
+        )
+        try_auto_download_isaco(db, store, on_progress=seen.append)
+        assert seen == ["در حال کار ..."]
+
+
+class TestAutoSyncMode:
+    """اگر منبعی تنظیم نشده باشد run_auto_sync زودتر برمی‌گردد، پس برای
+    رسیدن به apply_plan (و ثبت run) باید حداقل یک منبع بدهیم."""
+
+    def _with_haseb_source(self, db, tmp_path):
+        rows = [{"COD": "5010269900", "NAME": "کالا", "COD_ANB": "1",
+                 "NAME_ANB": "ا", "MOJ": "5.00000", "GH_FO": "0"}]
+        cal = write_dbf(tmp_path / "cal.DBF", CAL_FIELDS, rows)
+        db.set_setting("haseb_cal_path", str(cal))
+        db.set_setting("schedule_price", False)
+
+    def test_mode_is_recorded_on_run(self, db, store, tmp_path):
+        self._with_haseb_source(db, tmp_path)
+        woo = FakeWoo([woo_product(1, "5010269900", stock=1)])
+        run_auto_sync(db, store, woo=woo, mode="auto")
+        assert db.recent_runs(limit=1)[0]["mode"] == "auto"
+
+    def test_manual_mode_is_recorded(self, db, store, tmp_path):
+        self._with_haseb_source(db, tmp_path)
+        woo = FakeWoo([woo_product(1, "5010269900", stock=1)])
+        run_auto_sync(db, store, woo=woo, mode="manual")
+        assert db.recent_runs(limit=1)[0]["mode"] == "manual"

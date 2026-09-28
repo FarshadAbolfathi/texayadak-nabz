@@ -31,22 +31,34 @@ from .tray import app_icon
 
 
 class AutoSyncWorker(QObject):
-    """اجرای سینک خودکار روی نخ جدا (برای tray و زمان‌بند)."""
+    """اجرای سینک خودکار روی نخ جدا (برای tray و زمان‌بند).
+
+    توجه: این worker فقط بخشِ شبکه‌ای/دیتابیسی (خواندن محصولات، مقایسه،
+    اعمال) را روی نخ جدا انجام می‌دهد. دانلود مرورگری ایساکو باید پیش از
+    آن، روی نخ اصلی Qt انجام شده باشد (به :func:`try_auto_download_isaco`
+    و ``MainWindow._run_scheduled_sync`` نگاه کنید) چون ``QWebEngineView``
+    فقط در نخ رابط کاربری قابل استفاده است.
+    """
 
     done = Signal(object)
 
-    def __init__(self, db: Database, store: CredentialStore):
+    def __init__(self, db: Database, store: CredentialStore, mode: str = "auto"):
         super().__init__()
         self.db = db
         self.store = store
+        self.mode = mode
 
     def run(self) -> None:
         from ..jobs import run_auto_sync
-        result = run_auto_sync(self.db, self.store)
+        result = run_auto_sync(self.db, self.store, mode=self.mode)
         self.done.emit(result)
 
 
 class MainWindow(QMainWindow):
+    #: از نخ زمان‌بند (APScheduler) امن است چون با QueuedConnection وصل
+    #: می‌شود؛ صدور آن همیشه اجرای واقعی را به نخ اصلی Qt موکول می‌کند.
+    auto_sync_requested = Signal()
+
     def __init__(self, db: Database, store: CredentialStore):
         super().__init__()
         self.db = db
@@ -96,6 +108,15 @@ class MainWindow(QMainWindow):
         self.dashboard.rollback_requested.connect(self._rollback)
         self.settings.settings_changed.connect(self._on_settings_changed)
 
+        # QueuedConnection عمداً: صدور این سیگنال از هر نخی (از جمله نخ
+        # APScheduler) فقط یک رویداد در صف نخ اصلی می‌گذارد و بلافاصله
+        # برمی‌گردد — نه اجرای مستقیم و مسدودکننده. این هم اجرای امنِ
+        # QWebEngineView را تضمین می‌کند و هم جلوی هنگ کردن راه‌اندازی
+        # برنامه هنگام «جبران اجرای ازدست‌رفته» را می‌گیرد.
+        self.auto_sync_requested.connect(
+            self._run_scheduled_sync, Qt.ConnectionType.QueuedConnection
+        )
+
     def _build_header(self) -> QWidget:
         header = QFrame()
         header.setObjectName("Header")
@@ -139,6 +160,7 @@ class MainWindow(QMainWindow):
         from .tabs.schedule import ScheduleTab
         self.schedule = ScheduleTab(self.db)
         self.schedule.schedule_changed.connect(self._apply_schedule)
+        self.schedule.run_now_requested.connect(self._run_schedule_test)
         self.tabs.addTab(self.schedule, "⏰  زمان‌بندی")
 
     def _add_lazy_reports_tab(self) -> None:
@@ -182,7 +204,9 @@ class MainWindow(QMainWindow):
         open_action = menu.addAction("باز کردن برنامه")
         open_action.triggered.connect(self._restore_from_tray)
         sync_action = menu.addAction("سینک فوری")
-        sync_action.triggered.connect(self.run_auto_sync_async)
+        # lambda عمداً: QAction.triggered آرگومان bool می‌فرستد که با
+        # پارامتر mode تداخل می‌کند
+        sync_action.triggered.connect(lambda: self.run_auto_sync_async(mode="manual"))
         menu.addSeparator()
         quit_action = menu.addAction("خروج کامل")
         quit_action.triggered.connect(self._quit_app)
@@ -253,15 +277,39 @@ class MainWindow(QMainWindow):
         return None
 
     def _scheduled_job(self) -> None:
-        """توسط زمان‌بند صدا زده می‌شود (روی نخ APScheduler)."""
-        from ..jobs import run_auto_sync
-        result = run_auto_sync(self.db, self.store)
-        if self.tray and result.ok:
-            self.tray.showMessage("سینک خودکار", result.message, app_icon(), 4000)
+        """توسط زمان‌بند صدا زده می‌شود — ممکن است روی نخ APScheduler باشد.
 
-    def run_auto_sync_async(self) -> None:
-        """سینک فوری از منوی tray، روی نخ جدا."""
-        worker = AutoSyncWorker(self.db, self.store)
+        هرگز مستقیم کار سنگین نمی‌کند؛ فقط سیگنال را صادر می‌کند تا با
+        QueuedConnection به نخ اصلی Qt منتقل شود (جایی که QWebEngineView
+        برای دانلود خودکار ایساکو مجاز است).
+        """
+        self.auto_sync_requested.emit()
+
+    def _run_scheduled_sync(self) -> None:
+        """روی نخ اصلی اجرا می‌شود: دانلود خودکار ایساکو + سینک کامل."""
+        self.run_auto_sync_async(mode="auto")
+
+    def _run_schedule_test(self) -> None:
+        """دکمهٔ «تست همین حالا» در تب زمان‌بندی — همان مسیر واقعیِ سینکِ
+        خودکار را اجرا می‌کند تا کاربر مطمئن شود زمان‌بندی درست کار می‌کند."""
+        self.statusBar().showMessage("در حال اجرای آزمایشیِ سینک خودکار ...")
+        self._run_scheduled_sync()
+
+    def run_auto_sync_async(self, mode: str = "manual") -> None:
+        """سینک فوری (از منوی tray یا آزمایش زمان‌بندی).
+
+        ابتدا دانلود خودکار ایساکو را روی همینْ نخ اصلی انجام می‌دهد
+        (الزامی برای QWebEngineView)، سپس بخش شبکه‌ای/اعمال را به نخ جدا
+        می‌سپارد تا رابط کاربری در طول آن (کوتاه) قفل نشود.
+        """
+        from ..jobs import try_auto_download_isaco
+
+        self.statusBar().showMessage("در حال دانلود لیست قیمت ایساکو ...")
+        try_auto_download_isaco(
+            self.db, self.store, on_progress=self.statusBar().showMessage
+        )
+
+        worker = AutoSyncWorker(self.db, self.store, mode=mode)
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -273,6 +321,11 @@ class MainWindow(QMainWindow):
 
     def _on_auto_sync_done(self, result) -> None:
         self.dashboard.refresh()
+        if hasattr(self, "reports"):
+            self.reports.refresh()
+        self.statusBar().showMessage(
+            result.message if result.ok else f"خطا: {result.message}", 8000
+        )
         if self.tray:
             self.tray.showMessage(
                 "سینک", result.message if result.ok else f"خطا: {result.message}",

@@ -14,8 +14,11 @@
 
 from __future__ import annotations
 
+import logging
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .config import CredentialStore
 from .db import Database
@@ -24,6 +27,8 @@ from .runner import ApplyResult, apply_plan
 from .sources.haseb_dbf import load_products as load_haseb
 from .sources.isaco_excel import load as load_isaco
 from .targets.woocommerce import WooClient, WooConfig
+
+_log = logging.getLogger("nabz.jobs")
 
 
 @dataclass(slots=True)
@@ -52,6 +57,45 @@ def build_woo(store: CredentialStore) -> WooClient | None:
         consumer_key=creds.consumer_key,
         consumer_secret=creds.consumer_secret,
     ))
+
+
+def try_auto_download_isaco(
+    db: Database,
+    store: CredentialStore,
+    *,
+    on_progress: Callable[[str], None] | None = None,
+) -> str | None:
+    """لیست قیمت ایساکو را با مرورگر داخلی دانلود می‌کند (اگر ممکن بود).
+
+    ⚠️ باید در **نخِ اصلیِ Qt** فراخوانی شود، چون از ``QWebEngineView``
+    استفاده می‌کند که فقط در نخ رابط کاربری قابل استفاده است. برای سینکِ
+    زمان‌بندی‌شده (که روی نخ APScheduler اجرا می‌شود)، فراخوانیِ این تابع
+    باید با یک سیگنال Qt به نخ اصلی منتقل شود؛ نمونه‌اش در
+    ``MainWindow._run_scheduled_sync`` است.
+
+    موفق یا ناموفق، هیچ استثنایی به بیرون درز نمی‌کند — اگر دانلود نشد،
+    ``None`` برمی‌گرداند و ``run_auto_sync`` به فایل تنظیم‌شده برمی‌گردد.
+    """
+    creds = store.load_isaco()
+    if not (creds.scus and creds.username and creds.password):
+        return None
+    try:
+        from .sources.isaco_browser import IsacoDownloader
+    except ImportError as exc:
+        _log.warning("موتور مرورگر در دسترس نیست: %s", exc)
+        return None
+    try:
+        dest = str(Path(tempfile.gettempdir()) / "isaco_pricelist.xlsx")
+        downloader = IsacoDownloader(
+            creds.scus, creds.username, creds.password, on_progress=on_progress
+        )
+        path = downloader.download(dest)
+        db.set_setting("isaco_excel_path", path)
+        _log.info("دانلود خودکار ایساکو موفق: %s", path)
+        return path
+    except Exception as exc:  # noqa: BLE001 - هرگز نباید سینک را متوقف کند
+        _log.warning("دانلود خودکار ایساکو نشد: %s", exc, exc_info=True)
+        return None
 
 
 def run_auto_sync(

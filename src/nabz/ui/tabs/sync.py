@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import logging
-import tempfile
 from pathlib import Path
 
 _log = logging.getLogger("nabz.sync")
@@ -267,28 +266,15 @@ class SyncTab(QWidget):
         اگر موفق شد، مسیر فایل در isaco_excel_path ذخیره می‌شود و worker
         از آن می‌خواند. اگر نشد، بی‌صدا به فایل تنظیم‌شده برمی‌گردیم.
         """
-        creds = self.store.load_isaco()
-        if not (creds.scus and creds.username and creds.password):
-            return
-        try:
-            from ...sources.isaco_browser import IsacoDownloader
-        except ImportError as exc:
-            _log.warning("موتور مرورگر در دسترس نیست: %s", exc)
-            return
-        try:
-            self.status.setText("در حال دانلود خودکار لیست قیمت از ایساکو ...")
-            dest = str(Path(tempfile.gettempdir()) / "isaco_pricelist.xlsx")
-            downloader = IsacoDownloader(
-                creds.scus, creds.username, creds.password,
-                on_progress=self.status.setText,
-            )
-            path = downloader.download(dest)
-            self.db.set_setting("isaco_excel_path", path)
-            _log.info("دانلود خودکار ایساکو موفق: %s", path)
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("دانلود خودکار مرورگری نشد: %s", exc, exc_info=True)
+        from ...jobs import try_auto_download_isaco
+
+        self.status.setText("در حال دانلود خودکار لیست قیمت از ایساکو ...")
+        path = try_auto_download_isaco(
+            self.db, self.store, on_progress=self.status.setText
+        )
+        if not path:
             self.status.setText(
-                f"دانلود خودکار نشد ({exc}). از فایل تنظیم‌شده استفاده می‌شود."
+                "دانلود خودکار نشد؛ از فایل تنظیم‌شده استفاده می‌شود (در صورت وجود)."
             )
 
     def _on_compared(self, result) -> None:
