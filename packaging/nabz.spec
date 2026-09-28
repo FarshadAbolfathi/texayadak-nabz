@@ -31,6 +31,12 @@ hidden = [
     "Crypto.Cipher.PKCS1_OAEP",
     "Crypto.PublicKey.RSA",
     "openpyxl",
+    # موتور مرورگر داخلی برای دانلود خودکار لیست قیمت ایساکو
+    "PySide6.QtWebEngineWidgets",
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebChannel",
+    "PySide6.QtNetwork",
+    "PySide6.QtPrintSupport",
 ]
 
 # فایل‌های گرافیکی (لوگو و آیکون) باید داخل بسته قرار بگیرند
@@ -44,7 +50,7 @@ a = Analysis(
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "numpy", "pandas", "PySide6.QtWebEngineCore"],
+    excludes=["tkinter", "matplotlib", "numpy", "pandas"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

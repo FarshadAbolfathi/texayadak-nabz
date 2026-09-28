@@ -96,63 +96,21 @@ class CompareWorker(QObject):
             self.failed.emit(str(exc))
 
     def _load_isaco_prices(self) -> dict:
-        """قیمت‌ها را می‌گیرد: فایل دستی → دانلود خودکار → فایل تنظیم‌شده."""
-        # ۱) فایلی که کاربر دستی انتخاب کرده
-        if self.manual_excel:
+        """قیمت‌ها را از فایل می‌خواند: فایل دستی/دانلودشده → فایل تنظیم‌شده.
+
+        دانلود خودکار (مرورگری) در نخ اصلی انجام می‌شود، نه اینجا؛ نتیجه‌اش
+        به‌صورت ``manual_excel`` یا در ``isaco_excel_path`` به این worker می‌رسد.
+        """
+        if self.manual_excel and Path(self.manual_excel).is_file():
             self.progress.emit("در حال خواندن فایل ایساکو ...")
             return load_isaco(self.manual_excel)
 
-        # ۲) تلاش برای دانلود خودکار از پورتال ایساکو
-        isaco_creds = self.store.load_isaco()
-        if isaco_creds.scus and isaco_creds.username and isaco_creds.password:
-            try:
-                self.progress.emit("در حال ورود به ایساکو و دانلود لیست قیمت ...")
-                path = self._auto_download()
-                if path:
-                    return load_isaco(path)
-            except Exception as exc:  # noqa: BLE001 - به فایل تنظیم‌شده برمی‌گردیم
-                _log.warning("دانلود خودکار ایساکو نشد: %s", exc, exc_info=True)
-                self.progress.emit(f"دانلود خودکار نشد ({exc}). تلاش با فایل تنظیم‌شده ...")
-
-        # ۳) فایل تنظیم‌شده در تنظیمات
         configured = self.db.get_setting("isaco_excel_path", "")
         if configured and Path(configured).is_file():
-            self.progress.emit("در حال خواندن فایل تنظیم‌شدهٔ ایساکو ...")
+            self.progress.emit("در حال خواندن فایل لیست قیمت ایساکو ...")
             return load_isaco(configured)
 
         return {}
-
-    def _auto_download(self) -> str | None:
-        """لاگین و دانلود خودکار لیست قیمت ایساکو."""
-        import re
-        import requests
-
-        from ...sources.isaco_web import (
-            IsacoClient,
-            IsacoCredentials,
-            fetch_client_version,
-        )
-
-        creds_cfg = self.store.load_isaco()
-        # کلید خصوصی کلاینت از باندل زندهٔ سایت
-        bundle = requests.get(
-            "https://b2b.isaco.ir/static/js/19.b703063e.chunk.js", timeout=60
-        ).text
-        match = re.search(r"MIIEvQIBADANBgkqhkiG9w0B[A-Za-z0-9+/=]+", bundle)
-        if not match:
-            return None
-        client = IsacoClient(match.group(0))
-        client.login(IsacoCredentials(
-            scus=creds_cfg.scus,
-            username=creds_cfg.username,
-            password=creds_cfg.password,
-            client_version=fetch_client_version(),
-        ))
-        dest = str(Path(tempfile.gettempdir()) / "isaco_pricelist.xlsx")
-        client.download_price_list_excel(dest)
-        # مسیر دانلود را برای دفعهٔ بعد ذخیره می‌کنیم
-        self.db.set_setting("isaco_excel_path", dest)
-        return dest
 
     def _load_haseb_stock(self) -> dict:
         haseb_path = self.db.get_setting("haseb_cal_path", "")
@@ -274,8 +232,41 @@ class SyncTab(QWidget):
 
     def _fetch(self) -> None:
         self._set_busy(True)
+        # اگر فایل دستی نداریم، تلاش برای دانلود خودکار مرورگری (در نخ اصلی)
+        if not self._manual_path:
+            self._try_browser_download()
         worker = CompareWorker(self.db, self.store, self._manual_path)
         self._run_worker(worker, self._on_compared)
+
+    def _try_browser_download(self) -> None:
+        """دانلود خودکار لیست قیمت با مرورگر داخلی (نخ اصلی).
+
+        اگر موفق شد، مسیر فایل در isaco_excel_path ذخیره می‌شود و worker
+        از آن می‌خواند. اگر نشد، بی‌صدا به فایل تنظیم‌شده برمی‌گردیم.
+        """
+        creds = self.store.load_isaco()
+        if not (creds.scus and creds.username and creds.password):
+            return
+        try:
+            from ...sources.isaco_browser import IsacoDownloader
+        except ImportError as exc:
+            _log.warning("موتور مرورگر در دسترس نیست: %s", exc)
+            return
+        try:
+            self.status.setText("در حال دانلود خودکار لیست قیمت از ایساکو ...")
+            dest = str(Path(tempfile.gettempdir()) / "isaco_pricelist.xlsx")
+            downloader = IsacoDownloader(
+                creds.scus, creds.username, creds.password,
+                on_progress=self.status.setText,
+            )
+            path = downloader.download(dest)
+            self.db.set_setting("isaco_excel_path", path)
+            _log.info("دانلود خودکار ایساکو موفق: %s", path)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("دانلود خودکار مرورگری نشد: %s", exc, exc_info=True)
+            self.status.setText(
+                f"دانلود خودکار نشد ({exc}). از فایل تنظیم‌شده استفاده می‌شود."
+            )
 
     def _on_compared(self, result) -> None:
         plan, inc_price, inc_stock = result

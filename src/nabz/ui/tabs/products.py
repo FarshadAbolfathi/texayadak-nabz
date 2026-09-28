@@ -166,14 +166,27 @@ class ProductsTab(QWidget):
                 continue
             new_price = self.table.item(r, 3).text().strip()
             new_stock = self.table.item(r, 4).text().strip()
+            old_price = original.regular_price or ""
+            old_stock = "" if original.stock_quantity is None else str(original.stock_quantity)
             payload = {"id": pid}
-            if new_price and new_price != (original.regular_price or ""):
+
+            # قیمت: هر تفاوتی (از جمله پاک کردن) اعمال می‌شود.
+            # قیمت خالی یعنی حذف قیمت روی سایت.
+            if new_price != old_price:
                 payload["regular_price"] = new_price
-            if new_stock and new_stock != (
-                "" if original.stock_quantity is None else str(original.stock_quantity)
-            ):
-                payload["manage_stock"] = True
-                payload["stock_quantity"] = int(new_stock)
+
+            # موجودی: هر تفاوتی اعمال می‌شود.
+            if new_stock != old_stock:
+                if new_stock == "":
+                    # پاک کردن موجودی → مدیریت موجودی خاموش (بدون عدد)
+                    payload["manage_stock"] = False
+                else:
+                    try:
+                        payload["manage_stock"] = True
+                        payload["stock_quantity"] = int(float(new_stock))
+                    except ValueError:
+                        pass  # مقدار نامعتبر را نادیده بگیر
+
             if len(payload) > 1:
                 updates.append(payload)
 

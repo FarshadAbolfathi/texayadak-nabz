@@ -32,13 +32,15 @@ Name: "startup"; Description: "اجرای خودکار برنامه هنگام �
 
 [Files]
 Source: "..\dist\TexayadakNabz\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; آیکون برنامه را هم کنار اجرایی می‌گذاریم تا میان‌برها صریح از آن استفاده کنند
+Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\تکسایدک نبض"; Filename: "{app}\{#AppExeName}"
+Name: "{group}\تکسایدک نبض"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\icon.ico"
 Name: "{group}\حذف تکسایدک نبض"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\تکسایدک نبض"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\تکسایدک نبض"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 ; اجرای خودکار هنگام بوت ویندوز (برای سینک خودکار زمان‌بندی‌شده)
-Name: "{userstartup}\تکسایدک نبض"; Filename: "{app}\{#AppExeName}"; Tasks: startup
+Name: "{userstartup}\تکسایدک نبض"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: startup
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "اجرای برنامه"; Flags: nowait postinstall skipifsilent
