@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -17,8 +16,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ... import jalali
 from ...db import Database
-from ..widgets import Card
+from ..widgets import Card, make_copyable
 
 _STATUS_FA = {
     "running": "در حال اجرا",
@@ -26,7 +26,9 @@ _STATUS_FA = {
     "failed": "ناموفق",
     "rolled_back": "بازگردانده شد",
 }
-_MODE_FA = {"auto": "خودکار", "manual": "دستی", "excel": "اکسل"}
+_MODE_FA = {"auto": "سینک خودکار", "manual": "سینک دستی", "excel": "اکسل",
+            "create": "ایجاد محصول", "edit": "ویرایش محصولات"}
+_LEVEL_FA = {"info": "اطلاع", "warn": "هشدار", "error": "خطا"}
 
 
 def _fa(s) -> str:
@@ -34,9 +36,8 @@ def _fa(s) -> str:
 
 
 def _fmt_time(ts) -> str:
-    if not ts:
-        return "—"
-    return _fa(time.strftime("%Y/%m/%d  %H:%M", time.localtime(ts)))
+    """زمان به تاریخ شمسی: ۱۴۰۵/۰۷/۰۸  ۱۴:۰۵"""
+    return jalali.format_ts(ts)
 
 
 class ReportsTab(QWidget):
@@ -70,9 +71,28 @@ class ReportsTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch
         )
+        make_copyable(self.table)
         layout.addWidget(self.table, 1)
 
+        logs_header = QLabel("رویدادها")
+        logs_header.setObjectName("H1")
+        layout.addWidget(logs_header)
+        self.logs = QTableWidget(0, 3)
+        self.logs.setHorizontalHeaderLabels(["زمان", "سطح", "پیام"])
+        self.logs.setAlternatingRowColors(True)
+        self.logs.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.logs.verticalHeader().setVisible(False)
+        self.logs.setColumnWidth(0, 150)
+        self.logs.setColumnWidth(1, 70)
+        self.logs.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
+        )
+        self.logs.setWordWrap(True)
+        make_copyable(self.logs)
+        layout.addWidget(self.logs, 1)
+
     def refresh(self) -> None:
+        self._refresh_logs()
         runs = self.db.recent_runs(limit=100)
         self.table.setRowCount(len(runs))
         for r, run in enumerate(runs):
@@ -95,3 +115,23 @@ class ReportsTab(QWidget):
                 if c != 1:
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(r, c, cell)
+
+    def _refresh_logs(self) -> None:
+        logs = self.db.recent_logs(200)
+        self.logs.setRowCount(len(logs))
+        colors = {"error": "#c62828", "warn": "#ef6c00"}
+        for r, log in enumerate(logs):
+            cells = [
+                _fmt_time(log["at"]),
+                _LEVEL_FA.get(log["level"], log["level"]),
+                _fa(log["message"]),
+            ]
+            for c, text in enumerate(cells):
+                cell = QTableWidgetItem(text)
+                if c < 2:
+                    cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == 1 and log["level"] in colors:
+                    from PySide6.QtGui import QColor
+                    cell.setForeground(QColor(colors[log["level"]]))
+                cell.setToolTip(text)
+                self.logs.setItem(r, c, cell)

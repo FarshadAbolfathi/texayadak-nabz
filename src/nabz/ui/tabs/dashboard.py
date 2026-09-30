@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ... import jalali
 from ...db import Database
 from ..theme import COLORS
 from ..widgets import Card, StatCard, muted, scrollable
@@ -26,15 +27,18 @@ def _jalali_ago(ts: float | None) -> str:
     if delta < 60:
         return "لحظاتی پیش"
     if delta < 3600:
-        return f"{int(delta // 60)} دقیقه پیش"
+        return jalali.fa_digits(f"{int(delta // 60)} دقیقه پیش")
     if delta < 86400:
-        return f"{int(delta // 3600)} ساعت پیش"
-    return f"{int(delta // 86400)} روز پیش"
+        return jalali.fa_digits(f"{int(delta // 3600)} ساعت پیش")
+    # بیش از یک روز: تاریخ شمسی دقیق خواناتر است
+    return jalali.format_ts(ts)
 
 
 class DashboardTab(QWidget):
     sync_requested = Signal()
     rollback_requested = Signal()
+    new_products_requested = Signal()
+    orders_requested = Signal()
 
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
@@ -52,9 +56,16 @@ class DashboardTab(QWidget):
         self._outer = outer
         self._content = content
 
+        title_row = QHBoxLayout()
         header = QLabel("داشبورد")
         header.setObjectName("H1")
-        layout.addWidget(header)
+        title_row.addWidget(header)
+        title_row.addStretch(1)
+        import datetime as _dt
+        self.today = QLabel(f"📅  امروز: {jalali.format_long(_dt.date.today())}")
+        self.today.setObjectName("Muted")
+        title_row.addWidget(self.today)
+        layout.addLayout(title_row)
 
         # کارت‌های آمار
         stats = QGridLayout()
@@ -85,6 +96,16 @@ class DashboardTab(QWidget):
         row.addWidget(self.rollback_btn)
 
         actions.body().addLayout(row)
+        row2 = QHBoxLayout()
+        row2.setSpacing(12)
+        self.new_btn = QPushButton("🆕  محصولات جدید حاسب")
+        self.new_btn.setObjectName("Accent")
+        self.new_btn.clicked.connect(self.new_products_requested.emit)
+        row2.addWidget(self.new_btn)
+        orders_btn = QPushButton("🧾  سفارش‌های سایت")
+        orders_btn.clicked.connect(self.orders_requested.emit)
+        row2.addWidget(orders_btn)
+        actions.body().addLayout(row2)
         actions.add(muted(
             "«سینک فوری» لیست قیمت ایساکو و موجودی حاسب را می‌گیرد و بعد از نمایش "
             "پیش‌نمایش، روی سایت اعمال می‌کند. «بازگرداندن» همه‌چیز را به قبل برمی‌گرداند."
@@ -99,7 +120,9 @@ class DashboardTab(QWidget):
 
         if runs:
             last = runs[0]
-            self.stat_last.set_value(_jalali_ago(last.get("finished_at") or last.get("started_at")))
+            ts = last.get("finished_at") or last.get("started_at")
+            self.stat_last.set_value(_jalali_ago(ts))
+            self.stat_last.setToolTip(jalali.format_ts(ts))
             summary = last.get("summary")
             if summary:
                 import json
@@ -112,6 +135,10 @@ class DashboardTab(QWidget):
         errors = sum(1 for log in self.db.recent_logs(100) if log["level"] == "error")
         self.stat_errors.set_value(self._fa(errors))
         self.rollback_btn.setEnabled(self.db.last_applied_run() is not None)
+        pending = len(self.db.get_setting("new_products_pending", []) or [])
+        self.new_btn.setText(
+            f"🆕  محصولات جدید حاسب ({self._fa(pending)})" if pending
+            else "🆕  محصولات جدید حاسب")
 
     @staticmethod
     def _fa(n: int) -> str:

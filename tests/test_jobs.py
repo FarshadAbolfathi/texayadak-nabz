@@ -206,3 +206,50 @@ class TestAutoSyncMode:
         woo = FakeWoo([woo_product(1, "5010269900", stock=1)])
         run_auto_sync(db, store, woo=woo, mode="manual")
         assert db.recent_runs(limit=1)[0]["mode"] == "manual"
+
+
+class TestNewProductsNotice:
+    def test_sync_reports_haseb_items_missing_on_site(self, db, store, tmp_path):
+        rows = [
+            {"COD": "5010269900", "NAME": "روی سایت", "COD_ANB": "1",
+             "NAME_ANB": "ا", "MOJ": "5", "GH_FO": "0"},
+            {"COD": "5010269911", "NAME": "جدید", "COD_ANB": "1",
+             "NAME_ANB": "ا", "MOJ": "3", "GH_FO": "0"},
+            {"COD": "5010269922", "NAME": "بدون موجودی", "COD_ANB": "1",
+             "NAME_ANB": "ا", "MOJ": "0", "GH_FO": "0"},
+        ]
+        cal = write_dbf(tmp_path / "cal.DBF", CAL_FIELDS, rows)
+        db.set_setting("haseb_cal_path", str(cal))
+        db.set_setting("schedule_price", False)
+        woo = FakeWoo([woo_product(1, "5010269900", stock=10)])
+
+        result = run_auto_sync(db, store, woo=woo)
+        assert result.ok
+        assert result.missing_on_site == 1 and result.newly_missing == 1
+        assert db.get_setting("new_products_pending") == ["5010269911"]
+        assert db.get_setting("new_products_unread") is True
+        assert "کالای جدید" in result.message
+
+        # اجرای دوم: همان کالا دیگر «تازه» نیست
+        again = run_auto_sync(db, store, woo=woo)
+        assert again.missing_on_site == 1 and again.newly_missing == 0
+
+    def test_sync_never_creates_products(self, db, store, tmp_path):
+        rows = [{"COD": "5010269911", "NAME": "جدید", "COD_ANB": "1",
+                 "NAME_ANB": "ا", "MOJ": "3", "GH_FO": "0"}]
+        db.set_setting("haseb_cal_path", str(write_dbf(tmp_path / "c.DBF", CAL_FIELDS, rows)))
+
+        class NoCreateWoo(FakeWoo):
+            def batch_create(self, products):
+                raise AssertionError("سینک خودکار نباید محصول بسازد")
+
+        result = run_auto_sync(db, store, woo=NoCreateWoo([]))
+        assert result.newly_missing == 1
+
+    def test_schedule_entry_can_limit_to_stock(self, db, store, tmp_path):
+        path = make_isaco_xlsx(tmp_path / "p.xlsx")
+        db.set_setting("isaco_excel_path", str(path))
+        woo = FakeWoo([woo_product(1, "5010269900", price="1000000")])
+        result = run_auto_sync(db, store, woo=woo, update_price=False)
+        # قیمت خاموش و حاسبی هم نیست → منبعی برای سینک نیست
+        assert not result.ok

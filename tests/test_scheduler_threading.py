@@ -45,11 +45,11 @@ class TestSchedulerThreadSafety:
         """صدور از نخ دیگر نباید بلافاصله (هم‌زمان با آن نخ) اجرا شود."""
         called = threading.Event()
         monkeypatch.setattr(
-            window, "run_auto_sync_async", lambda mode="manual": called.set()
+            window, "run_auto_sync_async", lambda *a, **k: called.set()
         )
 
         def emit_from_thread():
-            window.auto_sync_requested.emit()
+            window.auto_sync_requested.emit(None)
 
         t = threading.Thread(target=emit_from_thread)
         t.start()
@@ -75,7 +75,7 @@ class TestSchedulerThreadSafety:
         نباید هیچ کار سنگینی انجام دهد — فقط باید سیگنال را صادر کند."""
         called = threading.Event()
         monkeypatch.setattr(
-            window, "run_auto_sync_async", lambda mode="manual": called.set()
+            window, "run_auto_sync_async", lambda *a, **k: called.set()
         )
 
         start = time.monotonic()

@@ -28,6 +28,20 @@ def log_file() -> Path:
     return log_dir() / LOG_FILE_NAME
 
 
+class _JalaliFormatter(logging.Formatter):
+    """زمان هر خط لاگ به تاریخ شمسی (با ارقام انگلیسی برای جستجوی راحت)."""
+
+    def formatTime(self, record, datefmt=None):  # noqa: N802 - امضای logging
+        import datetime as _dt
+
+        from .jalali import format_datetime
+
+        return format_datetime(
+            _dt.datetime.fromtimestamp(record.created),
+            persian_digits=False, seconds=True,
+        )
+
+
 def setup_logging(level: int = logging.INFO) -> logging.Logger:
     """لاگ را یک‌بار پیکربندی می‌کند و logger ریشه را برمی‌گرداند."""
     global _configured
@@ -38,9 +52,8 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
     logger.setLevel(level)
     logger.propagate = False
 
-    fmt = logging.Formatter(
+    fmt = _JalaliFormatter(
         "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     # فایل چرخشی: تا ۱ مگابایت، ۵ فایل پشتیبان

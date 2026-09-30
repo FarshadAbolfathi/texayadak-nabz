@@ -215,6 +215,8 @@ class HasebItem:
     quantity: Decimal    # موجودی
     warehouse_id: int
     warehouse_name: str
+    #: قیمت فروش ثبت‌شده در حاسب (ریال)؛ در خیلی از نصب‌ها صفر است.
+    sale_price: Decimal = Decimal(0)
 
 
 def _to_decimal(value: str) -> Decimal:
@@ -244,6 +246,9 @@ def load_products(
     columns = ["COD", "NAME", "MOJ", "COD_ANB", "NAME_ANB"]
 
     with DbfReader(cal_path) as reader:
+        has_price = "GH_FO" in {n.upper() for n in reader.field_names()}
+        if has_price:
+            columns = [*columns, "GH_FO"]
         for row in reader.rows(fields=columns):
             raw = row["COD"].strip()
             code = normalize(raw)
@@ -258,9 +263,11 @@ def load_products(
                 continue
 
             quantity = _to_decimal(row["MOJ"])
+            sale_price = _to_decimal(row.get("GH_FO", "")) if has_price else Decimal(0)
             existing = result.get(code)
             if existing is not None:
                 quantity += existing.quantity
+                sale_price = max(sale_price, existing.sale_price)
 
             result[code] = HasebItem(
                 code=code,
@@ -269,6 +276,7 @@ def load_products(
                 quantity=quantity,
                 warehouse_id=warehouse_id,
                 warehouse_name=row["NAME_ANB"].strip(),
+                sale_price=sale_price,
             )
 
     return result

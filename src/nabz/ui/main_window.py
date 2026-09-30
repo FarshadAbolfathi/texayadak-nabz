@@ -6,6 +6,7 @@ import datetime as _dt
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QObject, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -42,22 +43,32 @@ class AutoSyncWorker(QObject):
 
     done = Signal(object)
 
-    def __init__(self, db: Database, store: CredentialStore, mode: str = "auto"):
+    def __init__(self, db: Database, store: CredentialStore, mode: str = "auto",
+                 update_price: bool | None = None, update_stock: bool | None = None):
         super().__init__()
         self.db = db
         self.store = store
         self.mode = mode
+        self.update_price = update_price
+        self.update_stock = update_stock
 
     def run(self) -> None:
-        from ..jobs import run_auto_sync
-        result = run_auto_sync(self.db, self.store, mode=self.mode)
+        from ..jobs import AutoSyncResult, run_auto_sync
+        try:
+            result = run_auto_sync(
+                self.db, self.store, mode=self.mode,
+                update_price=self.update_price, update_stock=self.update_stock,
+            )
+        except Exception as exc:  # noqa: BLE001 - نخ نباید بی‌صدا بمیرد
+            result = AutoSyncResult(False, str(exc))
         self.done.emit(result)
 
 
 class MainWindow(QMainWindow):
     #: از نخ زمان‌بند (APScheduler) امن است چون با QueuedConnection وصل
     #: می‌شود؛ صدور آن همیشه اجرای واقعی را به نخ اصلی Qt موکول می‌کند.
-    auto_sync_requested = Signal()
+    #: آرگومان: ``ScheduleEntry`` همان ساعت (یا None برای تنظیمات پیش‌فرض).
+    auto_sync_requested = Signal(object)
 
     def __init__(self, db: Database, store: CredentialStore):
         super().__init__()
@@ -66,7 +77,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("تکسایدک نبض")
         self.setWindowIcon(app_icon())
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-        self.resize(1100, 720)
+        self.resize(1280, 800)
         self._scheduler: SyncScheduler | None = None
         self._allow_close = False
         self._build()
@@ -83,13 +94,17 @@ class MainWindow(QMainWindow):
         # تب‌های اصلی (با شکلک برای خوانایی بهتر)
         self.tabs.addTab(self.dashboard, "🏠  داشبورد")
         self._add_lazy_sync_tab()
-        self._add_lazy_excel_tab()
+        self._add_lazy_new_products_tab()
         self._add_lazy_products_tab()
-        self.tabs.addTab(self.settings, "⚙️  تنظیمات")
+        self._add_lazy_orders_tab()
+        self._add_lazy_excel_tab()
         self._add_lazy_schedule_tab()
         self._add_lazy_reports_tab()
+        self.tabs.addTab(self.settings, "⚙️  تنظیمات")
         self.tabs.addTab(HelpTab(), "❓  راهنما")
         self.tabs.addTab(SupportTab(), "📞  پشتیبانی")
+        self.tabs.tabBar().setUsesScrollButtons(True)
+        self.new_products.refresh_banner()
 
         # هدر برند بالای پنجره
         root = QWidget()
@@ -106,6 +121,9 @@ class MainWindow(QMainWindow):
         # اتصال دکمه‌های داشبورد
         self.dashboard.sync_requested.connect(self._go_to_sync)
         self.dashboard.rollback_requested.connect(self._rollback)
+        self.dashboard.new_products_requested.connect(
+            lambda: self.tabs.setCurrentWidget(self.new_products))
+        self.dashboard.orders_requested.connect(self._go_to_orders)
         self.settings.settings_changed.connect(self._on_settings_changed)
 
         # QueuedConnection عمداً: صدور این سیگنال از هر نخی (از جمله نخ
@@ -135,7 +153,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(logo)
         layout.addStretch(1)
 
-        sub = QLabel("همگام‌سازی قیمت و موجودی")
+        sub = QLabel("مدیریت فروشگاه: قیمت، موجودی، محصولات و سفارش‌ها")
         sub.setObjectName("Muted")
         layout.addWidget(sub)
         return header
@@ -146,7 +164,21 @@ class MainWindow(QMainWindow):
         from .tabs.sync import SyncTab
         self.sync = SyncTab(self.db, self.store)
         self.sync.finished_apply.connect(self.dashboard.refresh)
+        self.sync.new_products_found.connect(self._on_new_products_found)
         self.tabs.addTab(self.sync, "🔄  سینک ایساکو")
+
+    NEW_PRODUCTS_TITLE = "🆕  محصولات جدید حاسب"
+
+    def _add_lazy_new_products_tab(self) -> None:
+        from .tabs.new_products import NewProductsTab
+        self.new_products = NewProductsTab(self.db, self.store)
+        self.new_products.badge_changed.connect(self._set_new_products_badge)
+        self.tabs.addTab(self.new_products, self.NEW_PRODUCTS_TITLE)
+
+    def _add_lazy_orders_tab(self) -> None:
+        from .tabs.orders import OrdersTab
+        self.orders = OrdersTab(self.db, self.store)
+        self.tabs.addTab(self.orders, "🧾  سفارش‌ها")
 
     def _add_lazy_excel_tab(self) -> None:
         from .tabs.excel_import import ExcelImportTab
@@ -154,7 +186,9 @@ class MainWindow(QMainWindow):
 
     def _add_lazy_products_tab(self) -> None:
         from .tabs.products import ProductsTab
-        self.tabs.addTab(ProductsTab(self.db, self.store), "🛒  محصولات سایت")
+        self.products = ProductsTab(self.db, self.store)
+        self.products.changed.connect(self.dashboard.refresh)
+        self.tabs.addTab(self.products, "🛒  محصولات سایت")
 
     def _add_lazy_schedule_tab(self) -> None:
         from .tabs.schedule import ScheduleTab
@@ -173,6 +207,11 @@ class MainWindow(QMainWindow):
     def _go_to_sync(self) -> None:
         self.tabs.setCurrentWidget(self.sync)
 
+    def _go_to_orders(self) -> None:
+        self.tabs.setCurrentWidget(self.orders)
+        if not self.orders._orders:
+            self.orders.load()
+
     def _rollback(self) -> None:
         run_id = self.db.last_applied_run()
         if run_id is None:
@@ -190,6 +229,46 @@ class MainWindow(QMainWindow):
 
     def _on_settings_changed(self) -> None:
         self.statusBar().showMessage("تنظیمات ذخیره شد", 3000)
+
+    # -- اعلان محصولات جدید حاسب ------------------------------------------
+
+    def _set_new_products_badge(self, count: int) -> None:
+        self.dashboard.refresh()
+        index = self.tabs.indexOf(self.new_products)
+        if index < 0:
+            return
+        title = self.NEW_PRODUCTS_TITLE
+        if count:
+            title += f"  ({str(count).translate(str.maketrans('0123456789', '۰۱۲۳۴۵۶۷۸۹'))})"
+        self.tabs.setTabText(index, title)
+        self.tabs.tabBar().setTabTextColor(
+            index, QColor("#e65100") if count else QColor())
+
+    def _on_new_products_found(self, count: int) -> None:
+        """پس از سینک کامل: کالای جدیدی در حاسب هست که روی سایت نیست."""
+        self.new_products.refresh_banner()
+        fa_count = str(count).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+        message = (f"{fa_count} کالای جدید در حاسب موجود است که روی سایت نیست. "
+                   "برای بررسی و ارسال به سایت به تب «محصولات جدید حاسب» بروید.")
+        if self.tray:
+            self.tray.showMessage("محصول جدید در حاسب", message, app_icon(), 8000)
+        if self.isVisible():
+            # غیرمودال: اگر سینک شبانه بود و کسی پشت سیستم نیست، چیزی قفل نمی‌شود
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setWindowTitle("محصول جدید در حاسب")
+            box.setText(message + "\n\nهمین حالا باز شود؟")
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+            def answered(button) -> None:
+                if box.standardButton(button) == QMessageBox.StandardButton.Yes:
+                    self.tabs.setCurrentWidget(self.new_products)
+                    self.new_products.compare()
+
+            box.buttonClicked.connect(answered)
+            box.open()
 
     # -- System Tray ---------------------------------------------------
 
@@ -259,16 +338,12 @@ class MainWindow(QMainWindow):
     def _apply_schedule(self) -> None:
         if self._scheduler is None:
             return
-        config = ScheduleConfig.from_hhmm(
-            bool(self.db.get_setting("schedule_enabled", False)),
-            self.db.get_setting("schedule_time", "03:00"),
-        )
+        config = ScheduleConfig.from_settings(self.db.get_setting)
         self._scheduler.apply_config(config)
-        if config.enabled:
-            self.statusBar().showMessage(
-                f"زمان‌بندی فعال: هر روز ساعت {config.hour:02d}:{config.minute:02d}",
-                5000,
-            )
+        if config.enabled and config.active_entries:
+            times = "، ".join(e.hhmm for e in config.active_entries)
+            fa_times = times.translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+            self.statusBar().showMessage(f"زمان‌بندی فعال: هر روز ساعت {fa_times}", 5000)
 
     def _last_successful_run_time(self) -> _dt.datetime | None:
         for run in self.db.recent_runs(limit=20):
@@ -276,18 +351,22 @@ class MainWindow(QMainWindow):
                 return _dt.datetime.fromtimestamp(run["finished_at"])
         return None
 
-    def _scheduled_job(self) -> None:
+    def _scheduled_job(self, entry=None) -> None:
         """توسط زمان‌بند صدا زده می‌شود — ممکن است روی نخ APScheduler باشد.
 
         هرگز مستقیم کار سنگین نمی‌کند؛ فقط سیگنال را صادر می‌کند تا با
         QueuedConnection به نخ اصلی Qt منتقل شود (جایی که QWebEngineView
         برای دانلود خودکار ایساکو مجاز است).
         """
-        self.auto_sync_requested.emit()
+        self.auto_sync_requested.emit(entry)
 
-    def _run_scheduled_sync(self) -> None:
+    def _run_scheduled_sync(self, entry=None) -> None:
         """روی نخ اصلی اجرا می‌شود: دانلود خودکار ایساکو + سینک کامل."""
-        self.run_auto_sync_async(mode="auto")
+        if entry is None:
+            self.run_auto_sync_async(mode="auto")
+        else:
+            self.run_auto_sync_async(
+                mode="auto", update_price=entry.price, update_stock=entry.stock)
 
     def _run_schedule_test(self) -> None:
         """دکمهٔ «تست همین حالا» در تب زمان‌بندی — همان مسیر واقعیِ سینکِ
@@ -295,7 +374,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("در حال اجرای آزمایشیِ سینک خودکار ...")
         self._run_scheduled_sync()
 
-    def run_auto_sync_async(self, mode: str = "manual") -> None:
+    def run_auto_sync_async(self, mode: str = "manual", *,
+                            update_price: bool | None = None,
+                            update_stock: bool | None = None) -> None:
         """سینک فوری (از منوی tray یا آزمایش زمان‌بندی).
 
         ابتدا دانلود خودکار ایساکو را روی همینْ نخ اصلی انجام می‌دهد
@@ -304,20 +385,33 @@ class MainWindow(QMainWindow):
         """
         from ..jobs import try_auto_download_isaco
 
-        self.statusBar().showMessage("در حال دانلود لیست قیمت ایساکو ...")
-        try_auto_download_isaco(
-            self.db, self.store, on_progress=self.statusBar().showMessage
-        )
+        if getattr(self, "_sync_thread", None) is not None:
+            self.statusBar().showMessage("یک سینک خودکار در حال اجراست؛ این نوبت رد شد.", 5000)
+            return
 
-        worker = AutoSyncWorker(self.db, self.store, mode=mode)
+        if update_price is None:
+            update_price = bool(self.db.get_setting("schedule_price", True))
+        if update_price:
+            # دانلود لیست قیمت فقط وقتی لازم است که قیمت هم سینک شود
+            self.statusBar().showMessage("در حال دانلود لیست قیمت ایساکو ...")
+            try_auto_download_isaco(
+                self.db, self.store, on_progress=self.statusBar().showMessage
+            )
+
+        worker = AutoSyncWorker(self.db, self.store, mode=mode,
+                                update_price=update_price, update_stock=update_stock)
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.done.connect(self._on_auto_sync_done)
         worker.done.connect(thread.quit)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_sync_thread)
         self._sync_thread, self._sync_worker = thread, worker
         thread.start()
+
+    def _clear_sync_thread(self) -> None:
+        self._sync_thread = self._sync_worker = None
 
     def _on_auto_sync_done(self, result) -> None:
         self.dashboard.refresh()
@@ -331,6 +425,10 @@ class MainWindow(QMainWindow):
                 "سینک", result.message if result.ok else f"خطا: {result.message}",
                 app_icon(), 4000,
             )
+        if getattr(result, "newly_missing", 0):
+            self._on_new_products_found(result.newly_missing)
+        else:
+            self.new_products.refresh_banner()
 
 
 def default_db_path() -> Path:

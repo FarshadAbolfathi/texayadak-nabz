@@ -30,6 +30,9 @@ class WooCredentials:
     base_url: str = ""
     consumer_key: str = ""
     consumer_secret: str = ""
+    #: برای آپلود تصویر شاخص از کامپیوتر (Application Password وردپرس)
+    wp_user: str = ""
+    wp_app_password: str = ""
 
 
 @dataclass(slots=True)
@@ -61,7 +64,10 @@ class CredentialStore:
 
     def load_woo(self) -> WooCredentials:
         raw = self._backend.get("woo")
-        return WooCredentials(**json.loads(raw)) if raw else WooCredentials()
+        if not raw:
+            return WooCredentials()
+        known = WooCredentials.__dataclass_fields__
+        return WooCredentials(**{k: v for k, v in json.loads(raw).items() if k in known})
 
     def save_isaco(self, creds: IsacoCredentialsConfig) -> None:
         self._backend.set("isaco", json.dumps(asdict(creds)))

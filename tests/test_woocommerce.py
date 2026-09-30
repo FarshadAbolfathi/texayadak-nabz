@@ -190,3 +190,88 @@ class TestBatchOutcome:
         a.merge(b)
         assert a.updated == [1, 2, 4]
         assert a.failed == {3: "x", 5: "y"}
+
+
+class TestProductDetails:
+    def test_parses_categories_images_and_sale_price(self, config):
+        page = [{"id": 7, "name": "سپر", "sku": "50102699", "regular_price": "900",
+                 "sale_price": "800", "stock_quantity": 2, "manage_stock": True,
+                 "stock_status": "instock", "type": "simple", "status": "publish",
+                 "categories": [{"id": 3, "name": "پژو ۴۰۵"}],
+                 "images": [{"id": 55, "src": "https://x/a.jpg"}, {"id": 56, "src": "b"}]}]
+        session = FakeSession([FakeResponse(body=page, headers={"X-WP-TotalPages": "1"})])
+        (p,) = WooClient(config, session=session).fetch_products()
+        assert p.sale_price == "800"
+        assert p.category_ids == [3] and p.category_names == "پژو ۴۰۵"
+        assert p.image_url == "https://x/a.jpg" and p.image_id == 55
+        assert p.gallery_ids == (56,)
+
+
+class TestBatchErrors:
+    def test_item_level_error_is_reported_as_failure(self, config):
+        body = {"update": [{"id": 1}, {"id": 2, "error": {"code": "x", "message": "SKU تکراری"}}]}
+        session = FakeSession([FakeResponse(body=body)])
+        outcome = WooClient(config, session=session).batch_update(
+            [{"id": 1, "sku": "a"}, {"id": 2, "sku": "a"}])
+        assert outcome.updated == [1]
+        assert outcome.failed == {2: "SKU تکراری"}
+
+
+class TestCreate:
+    def test_batch_create_maps_indexes(self, config):
+        body = {"create": [{"id": 101}, {"id": 0, "error": {"message": "نامعتبر"}}]}
+        session = FakeSession([FakeResponse(body=body)])
+        created, failed = WooClient(config, session=session).batch_create(
+            [{"name": "a"}, {"name": "b"}])
+        assert created == {0: 101}
+        assert failed == {1: "نامعتبر"}
+        _, url, kwargs = session.calls[0]
+        assert url.endswith("products/batch") and "create" in kwargs["json"]
+
+    def test_trash_uses_status_update(self, config):
+        session = FakeSession([FakeResponse(body={"update": [{"id": 5}]})])
+        outcome = WooClient(config, session=session).batch_delete([5])
+        assert outcome.updated == [5]
+        assert session.calls[0][2]["json"] == {"update": [{"id": 5, "status": "trash"}]}
+
+
+class TestCategories:
+    def test_fetch_categories_unescapes_names(self, config):
+        body = [{"id": 1, "name": "ترمز &amp; کلاچ", "parent": 0, "slug": "b", "count": 4}]
+        session = FakeSession([FakeResponse(body=body, headers={"X-WP-TotalPages": "1"})])
+        (cat,) = WooClient(config, session=session).fetch_categories()
+        assert cat.name == "ترمز & کلاچ" and cat.count == 4
+
+
+class TestOrders:
+    def test_list_orders_returns_totals(self, config):
+        session = FakeSession([FakeResponse(
+            body=[{"id": 9}], headers={"X-WP-Total": "120", "X-WP-TotalPages": "3"})])
+        orders, total, pages = WooClient(config, session=session).list_orders(
+            status="processing", search="0912", page=2)
+        assert orders == [{"id": 9}] and total == 120 and pages == 3
+        params = session.calls[0][2]["params"]
+        assert params["status"] == "processing" and params["search"] == "0912"
+        assert params["page"] == 2
+
+    def test_any_status_is_not_sent(self, config):
+        session = FakeSession([FakeResponse(body=[])])
+        WooClient(config, session=session).list_orders(status="any")
+        assert "status" not in session.calls[0][2]["params"]
+
+    def test_update_order_and_note(self, config):
+        session = FakeSession([FakeResponse(body={"id": 9, "status": "completed"}),
+                               FakeResponse(body={"id": 1})])
+        client = WooClient(config, session=session)
+        assert client.update_order(9, {"status": "completed"})["status"] == "completed"
+        client.add_order_note(9, "ارسال شد", customer_note=True)
+        method, url, kwargs = session.calls[1]
+        assert method == "POST" and url.endswith("orders/9/notes")
+        assert kwargs["json"] == {"note": "ارسال شد", "customer_note": True}
+
+
+class TestMedia:
+    def test_upload_requires_app_password(self, config, tmp_path):
+        client = WooClient(config, session=FakeSession([]))
+        with pytest.raises(WooError, match="رمز برنامه"):
+            client.upload_media(str(tmp_path / "a.jpg"))

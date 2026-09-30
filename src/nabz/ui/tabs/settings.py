@@ -108,6 +108,22 @@ class SettingsTab(QWidget):
         self.woo_secret.setPlaceholderText("cs_...")
         cred_card.add(field("رمز ووکامرس (Consumer Secret)", self.woo_secret))
 
+        wp_row = QHBoxLayout()
+        wp_row.setSpacing(12)
+        self.wp_user = QLineEdit()
+        self.wp_user.setPlaceholderText("نام کاربری مدیر سایت")
+        self.wp_app_pass = QLineEdit()
+        self.wp_app_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.wp_app_pass.setPlaceholderText("xxxx xxxx xxxx xxxx xxxx xxxx")
+        wp_row.addWidget(field("نام کاربری وردپرس (برای آپلود تصویر)", self.wp_user), 1)
+        wp_row.addWidget(field("رمز برنامه (Application Password)", self.wp_app_pass), 1)
+        cred_card.body().addLayout(wp_row)
+        cred_card.add(muted(
+            "برای آپلود تصویر شاخص از کامپیوتر لازم است: در پیشخوان وردپرس ← "
+            "کاربران ← نمایهٔ شما ← بخش «رمزهای برنامه»، یک رمز با نام «نبض» "
+            "بسازید و اینجا وارد کنید. (رمز اصلی ورود به سایت را وارد نکنید.)"
+        ))
+
         row = QHBoxLayout()
         row.setSpacing(12)
         self.isaco_scus = QLineEdit()
@@ -122,6 +138,29 @@ class SettingsTab(QWidget):
         self._secure_note = muted("")
         cred_card.add(self._secure_note)
         layout.addWidget(cred_card)
+
+        # --- اطلاعات فاکتور ---
+        invoice_card = Card("اطلاعات فروشگاه در فاکتور")
+        self.inv_name = QLineEdit()
+        invoice_card.add(field("نام فروشگاه", self.inv_name))
+        self.inv_address = QLineEdit()
+        invoice_card.add(field("نشانی", self.inv_address))
+        inv_row = QHBoxLayout()
+        inv_row.setSpacing(12)
+        self.inv_phone = QLineEdit()
+        self.inv_postal = QLineEdit()
+        self.inv_economic = QLineEdit()
+        inv_row.addWidget(field("تلفن", self.inv_phone), 1)
+        inv_row.addWidget(field("کد پستی", self.inv_postal), 1)
+        inv_row.addWidget(field("شناسهٔ اقتصادی / ملی", self.inv_economic), 1)
+        invoice_card.body().addLayout(inv_row)
+        self.inv_website = QLineEdit()
+        invoice_card.add(field("وب‌سایت", self.inv_website))
+        self.inv_footer = QLineEdit()
+        invoice_card.add(field("متن پایین فاکتور", self.inv_footer))
+        self.inv_logo = self._path_row(invoice_card, "لوگوی فاکتور (اختیاری)",
+                                       "تصویر (*.png *.jpg *.jpeg)")
+        layout.addWidget(invoice_card)
 
         # --- امنیت ورود ---
         security_card = Card("امنیت و ورود")
@@ -246,6 +285,20 @@ class SettingsTab(QWidget):
         self.woo_key.setText(woo.consumer_key or DEFAULT_WOO_KEY)
         self.woo_secret.setText(woo.consumer_secret or DEFAULT_WOO_SECRET)
 
+        self.wp_user.setText(woo.wp_user)
+        self.wp_app_pass.setText(woo.wp_app_password)
+
+        self.inv_name.setText(self.db.get_setting("invoice_shop_name", "تکسایدک"))
+        self.inv_address.setText(self.db.get_setting("invoice_address", ""))
+        self.inv_phone.setText(self.db.get_setting("invoice_phone", ""))
+        self.inv_postal.setText(self.db.get_setting("invoice_postal_code", ""))
+        self.inv_economic.setText(self.db.get_setting("invoice_economic_code", ""))
+        self.inv_website.setText(
+            self.db.get_setting("invoice_website", "") or woo.base_url or "")
+        self.inv_footer.setText(
+            self.db.get_setting("invoice_footer", "از خرید شما سپاسگزاریم."))
+        self.inv_logo.setText(self.db.get_setting("invoice_logo_path", ""))
+
         isaco = self.store.load_isaco()
         self.isaco_scus.setText(isaco.scus or DEFAULT_ISACO_SCUS)
         self.isaco_user.setText(isaco.username or DEFAULT_ISACO_USERNAME)
@@ -287,7 +340,20 @@ class SettingsTab(QWidget):
             base_url=self.woo_url.text().strip(),
             consumer_key=self.woo_key.text().strip(),
             consumer_secret=self.woo_secret.text().strip(),
+            wp_user=self.wp_user.text().strip(),
+            wp_app_password=self.wp_app_pass.text().strip(),
         ))
+        for key, widget in (
+            ("invoice_shop_name", self.inv_name),
+            ("invoice_address", self.inv_address),
+            ("invoice_phone", self.inv_phone),
+            ("invoice_postal_code", self.inv_postal),
+            ("invoice_economic_code", self.inv_economic),
+            ("invoice_website", self.inv_website),
+            ("invoice_footer", self.inv_footer),
+            ("invoice_logo_path", self.inv_logo),
+        ):
+            self.db.set_setting(key, widget.text().strip())
         self.store.save_isaco(IsacoCredentialsConfig(
             scus=self.isaco_scus.text().strip(),
             username=self.isaco_user.text().strip(),

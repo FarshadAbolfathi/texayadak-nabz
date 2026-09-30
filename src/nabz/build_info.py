@@ -30,5 +30,17 @@ def version_line() -> str:
     if len(parts) > 2:
         line += "  " + parts[2]
     if BUILD_DATE:
-        line += f"\nتاریخ ساخت: {_to_fa(BUILD_DATE)}"
+        line += f"\nتاریخ ساخت: {_build_date_fa()}"
     return line
+
+
+def _build_date_fa() -> str:
+    """تاریخ ساخت (میلادیِ CI) را شمسی نشان می‌دهد."""
+    import datetime as _dt
+
+    from .jalali import format_date
+
+    try:
+        return format_date(_dt.date.fromisoformat(BUILD_DATE))
+    except ValueError:
+        return _to_fa(BUILD_DATE)

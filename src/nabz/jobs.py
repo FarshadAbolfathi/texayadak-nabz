@@ -26,7 +26,7 @@ from .engine import SyncPlan, build_plan
 from .runner import ApplyResult, apply_plan
 from .sources.haseb_dbf import load_products as load_haseb
 from .sources.isaco_excel import load as load_isaco
-from .targets.woocommerce import WooClient, WooConfig
+from .targets.woocommerce import WooClient
 
 _log = logging.getLogger("nabz.jobs")
 
@@ -36,6 +36,45 @@ class AutoSyncResult:
     ok: bool
     message: str
     apply_result: ApplyResult | None = None
+    #: کالاهای حاسب که روی سایت نیستند (کل / تازه‌کشف‌شده در همین اجرا)
+    missing_on_site: int = 0
+    newly_missing: int = 0
+
+
+def record_missing_products(
+    db: Database,
+    haseb: dict,
+    products: list,
+    woo: WooClient | None = None,
+) -> tuple[int, int]:
+    """کالاهای موجودِ حاسب که روی سایت نیستند را پیدا و ذخیره می‌کند.
+
+    فقط «خبر» می‌دهد؛ هیچ محصولی نمی‌سازد. کدهایی که قبلاً اعلام شده‌اند
+    یا کارفرما نادیده‌شان گرفته، دوباره «تازه» حساب نمی‌شوند.
+
+    :returns: ``(تعداد کل جاافتاده‌ها، تعداد تازه‌ها)``
+    """
+    from .new_products import find_missing, site_skus
+
+    extra: list[str] = []
+    if woo is not None:
+        for p in products:
+            if p.type == "variable":
+                try:
+                    extra.extend(woo.fetch_variation_skus(p.id))
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("متغیرهای محصول %s خوانده نشد: %s", p.id, exc)
+    ignored = db.get_setting("new_products_ignored", []) or []
+    missing = find_missing(haseb, site_skus(products, extra), ignored=ignored)
+    codes = [m.code for m in missing]
+    seen = set(db.get_setting("new_products_seen", []) or [])
+    fresh = [c for c in codes if c not in seen]
+    db.set_setting("new_products_pending", codes)
+    db.set_setting("new_products_seen", sorted(seen | set(codes)))
+    if fresh:
+        db.set_setting("new_products_unread", True)
+        db.log("info", f"{len(fresh)} کالای جدید در حاسب پیدا شد که روی سایت نیست.")
+    return len(codes), len(fresh)
 
 
 def _price_rules(db: Database):
@@ -49,14 +88,8 @@ def _stock_rules(db: Database):
 
 
 def build_woo(store: CredentialStore) -> WooClient | None:
-    creds = store.load_woo()
-    if not (creds.base_url and creds.consumer_key and creds.consumer_secret):
-        return None
-    return WooClient(WooConfig(
-        base_url=creds.base_url,
-        consumer_key=creds.consumer_key,
-        consumer_secret=creds.consumer_secret,
-    ))
+    from .ui.services import woo_client_from_store
+    return woo_client_from_store(store)
 
 
 def try_auto_download_isaco(
@@ -104,13 +137,19 @@ def run_auto_sync(
     *,
     mode: str = "auto",
     woo: WooClient | None = None,
+    update_price: bool | None = None,
+    update_stock: bool | None = None,
 ) -> AutoSyncResult:
     """یک اجرای کامل سینک بر اساس تنظیمات ذخیره‌شده.
 
     :param woo: برای تست می‌توان کلاینت جعلی تزریق کرد.
+    :param update_price: اگر داده نشود از تنظیمات خوانده می‌شود؛ هر ساعت
+        زمان‌بندی می‌تواند مقدار خودش را بدهد.
     """
-    update_price = bool(db.get_setting("schedule_price", True))
-    update_stock = bool(db.get_setting("schedule_stock", True))
+    if update_price is None:
+        update_price = bool(db.get_setting("schedule_price", True))
+    if update_stock is None:
+        update_stock = bool(db.get_setting("schedule_stock", True))
     isaco_path = db.get_setting("isaco_excel_path", "")
     haseb_path = db.get_setting("haseb_cal_path", "")
     warehouses = db.get_setting("isaco_warehouses", None)
@@ -164,8 +203,21 @@ def run_auto_sync(
         include_price=bool(isaco),
         include_stock=bool(haseb),
     )
+    missing = fresh = 0
+    if haseb:
+        try:
+            # همان داده‌های همین اجرا؛ فقط برای خبر دادن، بدون ساخت محصول
+            missing, fresh = record_missing_products(db, haseb, products, woo)
+        except Exception as exc:  # noqa: BLE001 - نباید سینک را خراب کند
+            _log.warning("بررسی محصولات جدید حاسب نشد: %s", exc, exc_info=True)
+
+    message = f"{result.applied_count} محصول به‌روز شد."
+    if fresh:
+        message += f" {fresh} کالای جدید حاسب روی سایت نیست."
     return AutoSyncResult(
         True,
-        f"{result.applied_count} محصول به‌روز شد.",
+        message,
         apply_result=result,
+        missing_on_site=missing,
+        newly_missing=fresh,
     )

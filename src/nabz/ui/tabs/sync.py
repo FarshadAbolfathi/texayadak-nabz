@@ -17,7 +17,7 @@ from pathlib import Path
 _log = logging.getLogger("nabz.sync")
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -44,7 +44,7 @@ from ..services import (
     stock_rules_from_db,
     woo_client_from_store,
 )
-from ..widgets import Card, muted
+from ..widgets import Card, make_copyable, muted
 
 
 class CompareWorker(QObject):
@@ -89,7 +89,14 @@ class CompareWorker(QObject):
                 update_price=bool(isaco),
                 update_stock=bool(haseb),
             )
-            self.done.emit((plan, bool(isaco), bool(haseb)))
+            fresh = 0
+            if haseb:
+                from ...jobs import record_missing_products
+                try:
+                    _, fresh = record_missing_products(self.db, haseb, products, woo)
+                except Exception:  # noqa: BLE001 - فقط اطلاع‌رسانی است
+                    _log.warning("بررسی محصولات جدید حاسب نشد", exc_info=True)
+            self.done.emit((plan, bool(isaco), bool(haseb), fresh))
         except Exception as exc:  # noqa: BLE001
             _log.exception("خطا در مقایسهٔ سینک")
             self.failed.emit(str(exc))
@@ -163,6 +170,8 @@ class TableApplyWorker(QObject):
 
 class SyncTab(QWidget):
     finished_apply = Signal()
+    #: تعداد کالاهای تازه‌کشف‌شدهٔ حاسب که روی سایت نیستند
+    new_products_found = Signal(int)
 
     HEADERS = ["کد (SKU)", "نام محصول", "قیمت فعلی", "قیمت جدید",
                "موجودی فعلی", "موجودی جدید", "وضعیت", "اعمال"]
@@ -229,15 +238,22 @@ class SyncTab(QWidget):
         self.table.setAlternatingRowColors(True)
         # فقط با دابل‌کلیک قابل ویرایش (تا اتفاقی تغییر نکند)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        # انتخاب خانه‌ای (نه ردیفی) تا بتوان فقط کد را انتخاب و کپی کرد
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(
-            self.COL_NAME, QHeaderView.ResizeMode.Stretch
-        )
+        head = self.table.horizontalHeader()
+        head.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeMode.Stretch)
+        # ستون کد آن‌قدر پهن که کد ۱۰ یا ۱۲ رقمی کامل دیده شود
+        head.setSectionResizeMode(self.COL_SKU, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(self.COL_SKU, 170)
+        self.table.cellDoubleClicked.connect(self._on_double_click)
+        make_copyable(self.table, code_columns=(self.COL_SKU,),
+                      on_copied=self.status.setText)
         layout.addWidget(self.table, 1)
         hint = muted(
             "برای ویرایش «قیمت جدید» یا «موجودی جدید» روی خانه دابل‌کلیک کنید. "
-            "دکمهٔ «اعمال» فقط همان محصول را روی سایت می‌گذارد."
+            "دابل‌کلیک روی کد آن را کپی می‌کند؛ Ctrl+C یا راست‌کلیک هم برای کپی "
+            "کار می‌کند. دکمهٔ «اعمال» فقط همان محصول را روی سایت می‌گذارد."
         )
         layout.addWidget(hint)
 
@@ -278,7 +294,7 @@ class SyncTab(QWidget):
             )
 
     def _on_compared(self, result) -> None:
-        plan, inc_price, inc_stock = result
+        plan, inc_price, inc_stock, fresh = result
         self._plan = plan
         self._inc_price, self._inc_stock = inc_price, inc_stock
         self._fill_table(plan)
@@ -290,6 +306,8 @@ class SyncTab(QWidget):
             f"نیازمند بررسی: {self._fa(s['needs_review'])}"
         )
         self.apply_btn.setEnabled(s["changes"] > 0)
+        if fresh:
+            self.new_products_found.emit(fresh)
 
     def _fill_table(self, plan: SyncPlan) -> None:
         rows = [i for i in plan.items if i.changes or i.needs_review]
@@ -313,6 +331,9 @@ class SyncTab(QWidget):
                 cell = QTableWidgetItem(text)
                 if c != self.COL_NAME:
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == self.COL_SKU:
+                    cell.setFont(self._code_font())
+                    cell.setToolTip(f"{text}\nدابل‌کلیک: کپی کد")
                 if review:
                     cell.setBackground(QBrush(QColor("#fff8e1")))
                 # فقط قیمت/موجودی جدید قابل ویرایش‌اند
@@ -326,6 +347,21 @@ class SyncTab(QWidget):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _=False, row=r: self._apply_single(row))
             self.table.setCellWidget(r, self.COL_APPLY, btn)
+
+    @staticmethod
+    def _code_font() -> QFont:
+        font = QFont("Consolas")
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setPointSize(10)
+        return font
+
+    def _on_double_click(self, row: int, col: int) -> None:
+        if col != self.COL_SKU:
+            return
+        item = self.table.item(row, col)
+        if item and item.text():
+            QGuiApplication.clipboard().setText(item.text())
+            self.status.setText(f"کد {item.text()} کپی شد.")
 
     def _collect_rows(self, row_indices: list[int]):
         """از ردیف‌های جدول، به‌روزرسانی ووکامرس و snapshot رول‌بک می‌سازد.

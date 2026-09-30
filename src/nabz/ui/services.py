@@ -43,4 +43,19 @@ def woo_client_from_store(store: CredentialStore) -> WooClient | None:
         base_url=creds.base_url,
         consumer_key=creds.consumer_key,
         consumer_secret=creds.consumer_secret,
+        wp_user=creds.wp_user,
+        wp_app_password=creds.wp_app_password,
     ))
+
+
+def categorizer_from_db(db: Database, categories):
+    """پیشنهاددهندهٔ دسته را با قواعد و تنظیمات ذخیره‌شده می‌سازد."""
+    from ..categorize import Categorizer, rules_from_settings
+
+    return Categorizer(
+        categories,
+        rules_from_settings(db.get_setting("category_rules", [])),
+        include_parents=bool(db.get_setting("category_include_parents", True)),
+        default_category=int(db.get_setting("category_default", 0) or 0) or None,
+        auto_match=bool(db.get_setting("category_auto_match", True)),
+    )

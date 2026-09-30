@@ -138,3 +138,90 @@ def muted(text: str) -> QLabel:
     label.setObjectName("Muted")
     label.setWordWrap(True)
     return label
+
+
+# -- جدول‌ها -------------------------------------------------------------
+
+
+def fa(value) -> str:
+    """ارقام را فارسی می‌کند."""
+    return str(value).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+
+
+def money(value, unit: str = "تومان") -> str:
+    """۱۲۳۴۵۰۰ → «۱٬۲۳۴٬۵۰۰ تومان»."""
+    if value in (None, ""):
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    text = f"{int(number):,}" if number == int(number) else f"{number:,.2f}"
+    return fa(text.replace(",", "٬")) + (f" {unit}" if unit else "")
+
+
+def selected_text(table) -> str:
+    """متن خانه‌های انتخاب‌شده، به شکل جدول (tab/خط جدید) برای paste در اکسل."""
+    ranges = table.selectedRanges()
+    if not ranges:
+        item = table.currentItem()
+        return item.text() if item else ""
+    lines = []
+    for rng in ranges:
+        for r in range(rng.topRow(), rng.bottomRow() + 1):
+            if table.isRowHidden(r):
+                continue
+            cells = []
+            for c in range(rng.leftColumn(), rng.rightColumn() + 1):
+                if table.isColumnHidden(c):
+                    continue
+                item = table.item(r, c)
+                cells.append(item.text() if item else "")
+            lines.append("\t".join(cells))
+    return "\n".join(lines)
+
+
+def make_copyable(table, *, code_columns: tuple[int, ...] = (), on_copied=None) -> None:
+    """کپی با Ctrl+C و منوی راست‌کلیک به یک QTableWidget اضافه می‌کند.
+
+    :param code_columns: ستون‌های «کد»؛ در منو گزینهٔ «کپی کد» می‌گیرند.
+    :param on_copied: تابعی که پیام کوتاه «کپی شد» را نمایش دهد.
+    """
+    from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
+    from PySide6.QtWidgets import QMenu
+
+    def copy(text: str) -> None:
+        if not text:
+            return
+        QGuiApplication.clipboard().setText(text)
+        if on_copied:
+            on_copied(f"کپی شد: {text if len(text) < 60 else text[:60] + '…'}")
+
+    action = QAction("کپی", table)
+    action.setShortcut(QKeySequence.StandardKey.Copy)
+    action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+    action.triggered.connect(lambda: copy(selected_text(table)))
+    table.addAction(action)
+
+    def menu(pos) -> None:
+        item = table.itemAt(pos)
+        m = QMenu(table)
+        if item is not None:
+            if item.column() in code_columns:
+                m.addAction("📋  کپی کد", lambda: copy(item.text()))
+            m.addAction("📋  کپی این خانه", lambda: copy(item.text()))
+            r = item.row()
+
+            def row_text() -> str:
+                return "\t".join(
+                    table.item(r, c).text() if table.item(r, c) else ""
+                    for c in range(table.columnCount())
+                    if not table.isColumnHidden(c)
+                )
+
+            m.addAction("📋  کپی کل ردیف", lambda: copy(row_text()))
+        m.addAction("📋  کپی انتخاب‌شده‌ها (Ctrl+C)", lambda: copy(selected_text(table)))
+        m.exec(table.viewport().mapToGlobal(pos))
+
+    table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    table.customContextMenuRequested.connect(menu)
