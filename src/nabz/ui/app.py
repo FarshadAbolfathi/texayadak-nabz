@@ -47,7 +47,8 @@ def run(db_path: str | Path | None = None) -> int:
             return 0
 
     window = MainWindow(db, store)
-    window.show()
+    # همیشه تمام‌صفحه (و داخل محدودهٔ صفحه، بدون بیرون‌زدگی از لبه‌ها)
+    window.showMaximized()
     code = app.exec()
     db.close()
     return code

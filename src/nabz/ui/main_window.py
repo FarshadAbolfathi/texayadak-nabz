@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QScrollArea,
     QSystemTrayIcon,
     QTabWidget,
     QVBoxLayout,
@@ -29,6 +30,40 @@ from .tabs.help import HelpTab
 from .tabs.settings import SettingsTab
 from .tabs.support import SupportTab
 from .tray import app_icon
+
+
+class PageTabs(QTabWidget):
+    """تب‌هایی که هر صفحه را در یک ناحیهٔ اسکرول «فقط در صورت نیاز» می‌پیچند.
+
+    اگر صفحه‌نمایش کارفرما باریک باشد (مثلاً لپ‌تاپ ۱۳۶۶ پیکسلی با بزرگ‌نمایی
+    ۱۲۵٪ ویندوز)، به‌جای اینکه حداقل عرض تب‌ها پنجره را از لبهٔ صفحه بیرون
+    بزند، داخل همان تب اسکرول ظاهر می‌شود. ``setCurrentWidget``/``indexOf``
+    همچنان با خودِ صفحه (نه پوشش) کار می‌کنند.
+    """
+
+    def addTab(self, page, *args):  # noqa: N802 - امضای Qt
+        scroll = QScrollArea()
+        scroll.setObjectName("PageScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(page)
+        scroll.setProperty("page", page)
+        return super().addTab(scroll, *args)
+
+    def page(self, index: int):
+        wrapper = self.widget(index)
+        return wrapper.widget() if isinstance(wrapper, QScrollArea) else wrapper
+
+    def indexOf(self, page):  # noqa: N802
+        for i in range(self.count()):
+            if self.page(i) is page or self.widget(i) is page:
+                return i
+        return -1
+
+    def setCurrentWidget(self, page):  # noqa: N802
+        index = self.indexOf(page)
+        if index >= 0:
+            self.setCurrentIndex(index)
 
 
 class AutoSyncWorker(QObject):
@@ -77,15 +112,31 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("تکسایدک نبض")
         self.setWindowIcon(app_icon())
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-        self.resize(1280, 800)
+        self._fit_to_screen()
         self._scheduler: SyncScheduler | None = None
         self._allow_close = False
         self._build()
         self._setup_tray()
         self._setup_scheduler()
 
+    def _fit_to_screen(self) -> None:
+        """اندازهٔ حالت «غیرتمام‌صفحه» داخل محدودهٔ قابل‌استفادهٔ صفحه؛ خود
+        پنجره در :func:`app.run` تمام‌صفحه (Maximized) باز می‌شود."""
+        from PySide6.QtGui import QGuiApplication
+
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(1280, 800)
+            return
+        area = screen.availableGeometry()
+        width = min(1280, int(area.width() * 0.92))
+        height = min(800, int(area.height() * 0.9))
+        self.resize(width, height)
+        self.move(area.x() + (area.width() - width) // 2,
+                  area.y() + (area.height() - height) // 2)
+
     def _build(self) -> None:
-        self.tabs = QTabWidget()
+        self.tabs = PageTabs()
         self.tabs.setDocumentMode(True)
 
         self.dashboard = DashboardTab(self.db)
@@ -299,7 +350,7 @@ class MainWindow(QMainWindow):
             self._restore_from_tray()
 
     def _restore_from_tray(self) -> None:
-        self.showNormal()
+        self.showMaximized()
         self.raise_()
         self.activateWindow()
 

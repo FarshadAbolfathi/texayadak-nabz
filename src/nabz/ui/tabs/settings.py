@@ -278,6 +278,8 @@ class SettingsTab(QWidget):
             DEFAULT_WOO_KEY,
             DEFAULT_WOO_SECRET,
             DEFAULT_WOO_URL,
+            DEFAULT_WP_APP_PASSWORD,
+            DEFAULT_WP_USER,
         )
 
         woo = self.store.load_woo()
@@ -285,8 +287,8 @@ class SettingsTab(QWidget):
         self.woo_key.setText(woo.consumer_key or DEFAULT_WOO_KEY)
         self.woo_secret.setText(woo.consumer_secret or DEFAULT_WOO_SECRET)
 
-        self.wp_user.setText(woo.wp_user)
-        self.wp_app_pass.setText(woo.wp_app_password)
+        self.wp_user.setText(woo.wp_user or DEFAULT_WP_USER)
+        self.wp_app_pass.setText(woo.wp_app_password or DEFAULT_WP_APP_PASSWORD)
 
         self.inv_name.setText(self.db.get_setting("invoice_shop_name", "تکسایدک"))
         self.inv_address.setText(self.db.get_setting("invoice_address", ""))

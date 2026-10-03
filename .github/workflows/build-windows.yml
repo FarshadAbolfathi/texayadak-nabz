@@ -54,6 +54,8 @@ jobs:
           WOO_URL: ${{ secrets.WOO_URL }}
           WOO_KEY: ${{ secrets.WOO_KEY }}
           WOO_SECRET: ${{ secrets.WOO_SECRET }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
           ISACO_SCUS: ${{ secrets.ISACO_SCUS }}
           ISACO_USERNAME: ${{ secrets.ISACO_USERNAME }}
           ISACO_PASSWORD: ${{ secrets.ISACO_PASSWORD }}
@@ -64,6 +66,8 @@ jobs:
           DEFAULT_WOO_URL = "$env:WOO_URL"
           DEFAULT_WOO_KEY = "$env:WOO_KEY"
           DEFAULT_WOO_SECRET = "$env:WOO_SECRET"
+          DEFAULT_WP_USER = "$env:WP_USER"
+          DEFAULT_WP_APP_PASSWORD = "$env:WP_APP_PASSWORD"
           DEFAULT_ISACO_SCUS = "$env:ISACO_SCUS"
           DEFAULT_ISACO_USERNAME = "$env:ISACO_USERNAME"
           DEFAULT_ISACO_PASSWORD = "$env:ISACO_PASSWORD"

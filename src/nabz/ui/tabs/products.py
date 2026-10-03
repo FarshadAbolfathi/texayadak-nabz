@@ -49,7 +49,7 @@ from ...skucode import digits_only, normalize
 from ...targets.woocommerce import WooProduct
 from ..category_dialog import CategoryDialog
 from ..services import woo_client_from_store
-from ..widgets import fa, make_copyable, money, muted
+from ..widgets import fa, make_copyable, money, muted, setup_columns
 from ..workers import run_async
 
 STOCK_STATUS = [("instock", "موجود"), ("outofstock", "ناموجود"),
@@ -163,7 +163,7 @@ class MoneyDelegate(QStyledItemDelegate):
 class ImageDialog(QDialog):
     """انتخاب تصویر شاخص: فایل از کامپیوتر، آدرس اینترنتی، یا حذف."""
 
-    def __init__(self, current: QPixmap | None, can_upload: bool, parent=None):
+    def __init__(self, current: QPixmap | None, can_upload: bool = True, parent=None):
         super().__init__(parent)
         self.setWindowTitle("تصویر شاخص")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
@@ -184,12 +184,6 @@ class ImageDialog(QDialog):
         file_btn.setObjectName("Primary")
         file_btn.clicked.connect(self._pick_file)
         layout.addWidget(file_btn)
-        if not can_upload:
-            layout.addWidget(muted(
-                "برای آپلود فایل، در «تنظیمات» نام کاربری و «رمز برنامه» "
-                "(Application Password) وردپرس را وارد کنید. تا آن موقع می‌توانید "
-                "از آدرس اینترنتی تصویر استفاده کنید."))
-            file_btn.setEnabled(False)
         url_btn = QPushButton("🔗  آدرس اینترنتی تصویر")
         url_btn.clicked.connect(self._pick_url)
         layout.addWidget(url_btn)
@@ -316,9 +310,9 @@ class ProductsTab(QWidget):
         self._cat_changes: dict[int, list[int]] = {}
         self._img_changes: dict[int, tuple[str, str]] = {}
         self._thumbs: dict[str, QPixmap] = {}
-        self._pending_thumbs: set[str] = set()
+        self._failed_thumbs: set[str] = set()
+        self._thumb_loader = None
         self._filling = False
-        self._net = None
         self._build()
 
     # -- ساخت رابط ----------------------------------------------------
@@ -358,23 +352,26 @@ class ProductsTab(QWidget):
         self.stock_filter.currentIndexChanged.connect(lambda *_: self._filter())
         toolbar.addWidget(self.stock_filter)
         layout.addLayout(toolbar)
+        self.export_btn = QPushButton("📤  خروجی اکسل")
+        self.export_btn.clicked.connect(self._export)
+        toolbar.addWidget(self.export_btn)
 
         actions = QHBoxLayout()
         self.add_btn = QPushButton("➕  محصول جدید")
         self.add_btn.clicked.connect(self._add_product)
-        self.bulk_btn = QPushButton("🧰  ویرایش گروهی انتخاب‌شده‌ها")
+        self.bulk_btn = QPushButton("🧰  ویرایش گروهی")
+        self.bulk_btn.setToolTip("ویرایش گروهی ردیف‌های انتخاب‌شده (دسته، قیمت، وضعیت)")
         self.bulk_btn.clicked.connect(self._bulk_menu)
-        self.trash_btn = QPushButton("🗑  انتقال به زباله‌دان")
+        self.trash_btn = QPushButton("🗑  زباله‌دان")
+        self.trash_btn.setToolTip("انتقال محصولات انتخاب‌شده به زباله‌دان سایت")
         self.trash_btn.setObjectName("Danger")
         self.trash_btn.clicked.connect(self._trash_selected)
-        self.export_btn = QPushButton("📤  خروجی اکسل")
-        self.export_btn.clicked.connect(self._export)
         self.discard_btn = QPushButton("↩️  لغو تغییرات")
         self.discard_btn.clicked.connect(self._discard)
         self.save_btn = QPushButton("💾  ذخیرهٔ تغییرات")
         self.save_btn.setObjectName("Success")
         self.save_btn.clicked.connect(self._save)
-        for b in (self.add_btn, self.bulk_btn, self.trash_btn, self.export_btn):
+        for b in (self.add_btn, self.bulk_btn, self.trash_btn):
             actions.addWidget(b)
         actions.addStretch(1)
         actions.addWidget(self.discard_btn)
@@ -402,13 +399,12 @@ class ProductsTab(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(THUMB + 8)
         self.table.setIconSize(QSize(THUMB, THUMB))
-        head = self.table.horizontalHeader()
-        head.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeMode.Stretch)
-        widths = {self.COL_IMG: THUMB + 16, self.COL_ID: 70, self.COL_SKU: 150,
-                  self.COL_PRICE: 120, self.COL_SALE: 110, self.COL_STOCK: 70,
-                  self.COL_STOCK_STATUS: 110, self.COL_STATUS: 115, self.COL_CATS: 220}
-        for col, w in widths.items():
-            self.table.setColumnWidth(col, w)
+        setup_columns(self.table, {
+            self.COL_IMG: THUMB + 24, self.COL_ID: 70, self.COL_SKU: 140,
+            self.COL_NAME: 400, self.COL_PRICE: 120, self.COL_SALE: 110,
+            self.COL_STOCK: 75, self.COL_STOCK_STATUS: 115, self.COL_STATUS: 120,
+            self.COL_CATS: 240,
+        }, db=self.db, key="cols_products", fixed=(self.COL_IMG,))
         self.table.setItemDelegateForColumn(
             self.COL_STOCK_STATUS, ComboDelegate(STOCK_STATUS, self.table))
         self.table.setItemDelegateForColumn(
@@ -416,6 +412,8 @@ class ProductsTab(QWidget):
         self.table.setItemDelegateForColumn(self.COL_PRICE, MoneyDelegate(self.table))
         self.table.setItemDelegateForColumn(self.COL_SALE, MoneyDelegate(self.table))
         self.table.cellDoubleClicked.connect(self._on_double_click)
+        # یک کلیک روی تصویر کافی است تا پنجرهٔ تصویر باز شود
+        self.table.cellClicked.connect(self._on_click)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.verticalScrollBar().valueChanged.connect(
             lambda *_: self._thumb_timer.start())
@@ -424,7 +422,9 @@ class ProductsTab(QWidget):
         layout.addWidget(self.table, 1)
         layout.addWidget(muted(
             "برای ویرایش هر خانه دابل‌کلیک کنید (یا شروع به تایپ کنید). روی "
-            "«تصویر» یا «دسته‌بندی‌ها» دابل‌کلیک کنید تا پنجرهٔ انتخاب باز شود. "
+            "«تصویر» کلیک و روی «دسته‌بندی‌ها» دابل‌کلیک کنید تا پنجرهٔ انتخاب باز "
+            "شود. عرض ستون‌ها با کشیدن لبهٔ سرستون تغییر می‌کند؛ Ctrl+C یا راست‌کلیک "
+            "برای کپی. "
             "خانه‌های تغییرکرده آبی می‌شوند و تا «ذخیرهٔ تغییرات» روی سایت نمی‌روند."
         ))
 
@@ -484,10 +484,8 @@ class ProductsTab(QWidget):
             img = QTableWidgetItem()
             img.setFlags(img.flags() & ~Qt.ItemFlag.ItemIsEditable)
             img.setData(Qt.ItemDataRole.UserRole, p.image_url)
-            img.setToolTip("دابل‌کلیک برای تغییر تصویر شاخص")
-            if not p.image_url:
-                img.setText("＋")
-                img.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            img.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._show_image_state(img, p.image_url)
             self.table.setItem(r, self.COL_IMG, img)
 
             pid = QTableWidgetItem(fa(p.id))
@@ -536,60 +534,86 @@ class ProductsTab(QWidget):
 
     # -- تصاویر کوچک ------------------------------------------------------
 
-    def _network(self):
-        if self._net is None:
-            from PySide6.QtNetwork import QNetworkAccessManager
-            self._net = QNetworkAccessManager(self)
-            self._net.finished.connect(self._on_thumb_reply)
-        return self._net
+    def _show_image_state(self, item: QTableWidgetItem, url: str) -> None:
+        """خانهٔ تصویر: تصویر کوچک، «در حال بارگذاری»، «بدون تصویر» یا «خطا»."""
+        item.setForeground(QBrush())
+        if not url:
+            item.setIcon(QIcon())
+            item.setText("بدون\nتصویر")
+            item.setForeground(QBrush(QColor("#c62828")))
+            item.setToolTip("این محصول تصویر شاخص ندارد — دابل‌کلیک برای افزودن")
+        elif url in self._thumbs:
+            item.setIcon(QIcon(self._thumbs[url]))
+            item.setText("")
+            item.setToolTip("دابل‌کلیک برای تغییر تصویر شاخص")
+        elif url in self._failed_thumbs:
+            item.setIcon(QIcon())
+            item.setText("⚠️")
+            item.setToolTip("تصویر دارد ولی از سایت دریافت نشد.\n" + url
+                            + "\nدابل‌کلیک برای تغییر تصویر شاخص")
+        else:
+            item.setIcon(QIcon())
+            item.setText("⏳")
+            item.setToolTip("در حال دریافت تصویر ...")
+
+    def _loader(self):
+        if self._thumb_loader is None:
+            from ..thumbs import ThumbLoader
+            self._thumb_loader = ThumbLoader(self)
+            self._thumb_loader.loaded.connect(
+                self._on_thumb_loaded, Qt.ConnectionType.QueuedConnection)
+        return self._thumb_loader
 
     def _load_visible_thumbs(self) -> None:
-        if not self._products:
+        """اول ردیف‌های در دید، بعد بقیه — تا ستون تصویر همهٔ محصولات پر شود
+        و معلوم باشد کدام محصول تصویر دارد."""
+        if not self._products or self.table.rowCount() == 0:
             return
-        top = self.table.rowAt(0)
+        top = max(self.table.rowAt(0), 0)
         bottom = self.table.rowAt(self.table.viewport().height() - 1)
-        top = max(top, 0)
         bottom = self.table.rowCount() - 1 if bottom < 0 else bottom
-        from PySide6.QtNetwork import QNetworkRequest
-        for r in range(top, min(bottom + 3, self.table.rowCount())):
+        visible = list(range(top, min(bottom + 3, self.table.rowCount())))
+        rest = [r for r in range(self.table.rowCount()) if r < top or r > bottom + 2]
+        for r in visible + rest:
             item = self.table.item(r, self.COL_IMG)
             url = item.data(Qt.ItemDataRole.UserRole) if item else ""
-            if not url or url in self._pending_thumbs:
+            if not url or url in self._failed_thumbs:
                 continue
             if url in self._thumbs:
-                item.setIcon(QIcon(self._thumbs[url]))
+                if item.icon().isNull():
+                    self._show_image_state(item, url)
                 continue
             if url.startswith("file:"):
                 pix = QPixmap(QUrl(url).toLocalFile())
                 self._store_thumb(url, pix)
                 continue
-            self._pending_thumbs.add(url)
-            request = QNetworkRequest(QUrl(url))
-            request.setAttribute(
-                QNetworkRequest.Attribute.RedirectPolicyAttribute,
-                QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
-            self._network().get(request)
+            self._loader().request(url)
 
-    def _on_thumb_reply(self, reply) -> None:
-        url = reply.request().url().toString()
-        self._pending_thumbs.discard(url)
-        pix = QPixmap()
-        if not reply.error():
-            pix.loadFromData(reply.readAll())
-        reply.deleteLater()
-        self._store_thumb(url, pix)
+    def _on_thumb_loaded(self, url: str, image) -> None:
+        if image.isNull():
+            self._failed_thumbs.add(url)
+            self._refresh_thumb_cells(url)
+            return
+        self._store_thumb(url, QPixmap.fromImage(image))
 
     def _store_thumb(self, url: str, pix: QPixmap) -> None:
         if pix.isNull():
-            return
-        pix = pix.scaled(THUMB, THUMB, Qt.AspectRatioMode.KeepAspectRatio,
-                         Qt.TransformationMode.SmoothTransformation)
-        self._thumbs[url] = pix
+            self._failed_thumbs.add(url)
+        else:
+            if max(pix.width(), pix.height()) > 300:
+                pix = pix.scaled(300, 300, Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+            self._thumbs[url] = pix
+        self._refresh_thumb_cells(url)
+
+    def _refresh_thumb_cells(self, url: str) -> None:
+        was = self._filling
+        self._filling = True
         for r in range(self.table.rowCount()):
             item = self.table.item(r, self.COL_IMG)
             if item and item.data(Qt.ItemDataRole.UserRole) == url:
-                item.setIcon(QIcon(pix))
-                item.setText("")
+                self._show_image_state(item, url)
+        self._filling = was
 
     # -- ویرایش -------------------------------------------------------
 
@@ -646,11 +670,16 @@ class ProductsTab(QWidget):
         img.setBackground(QBrush(_CHANGED) if p.id in self._img_changes else QBrush())
         self._filling = False
 
+    def _on_click(self, row: int, col: int) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        # با Ctrl/Shift کاربر دارد چند ردیف انتخاب می‌کند، نه تغییر تصویر
+        if col == self.COL_IMG and QApplication.keyboardModifiers() == Qt.KeyboardModifier.NoModifier:
+            self._edit_image(row)
+
     def _on_double_click(self, row: int, col: int) -> None:
         if col == self.COL_CATS:
             self._edit_categories([row])
-        elif col == self.COL_IMG:
-            self._edit_image(row)
 
     def _create_category(self, name: str, parent: int):
         woo = woo_client_from_store(self.store)
@@ -707,22 +736,23 @@ class ProductsTab(QWidget):
     def _edit_image(self, row: int) -> None:
         item = self.table.item(row, self.COL_IMG)
         url = item.data(Qt.ItemDataRole.UserRole)
-        woo = woo_client_from_store(self.store)
-        dlg = ImageDialog(self._thumbs.get(url), bool(woo and woo.can_upload_media), self)
+        dlg = ImageDialog(self._thumbs.get(url), parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.result_action:
             return
         action, value = dlg.result_action
         pid = self._pid(row)
         self._img_changes[pid] = (action, value)
         self._filling = True
-        item.setIcon(QIcon())
         if action == "remove":
             item.setData(Qt.ItemDataRole.UserRole, "")
-            item.setText("✖")
+            self._show_image_state(item, "")
+            item.setText("✖\nحذف")
+            item.setToolTip("تصویر شاخص با «ذخیرهٔ تغییرات» حذف می‌شود")
         else:
             shown = QUrl.fromLocalFile(value).toString() if action == "file" else value
             item.setData(Qt.ItemDataRole.UserRole, shown)
-            item.setText("…")
+            self._failed_thumbs.discard(shown)
+            self._show_image_state(item, shown)
         self._filling = False
         self._refresh_row_marks(row)
         self._thumb_timer.start()

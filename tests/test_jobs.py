@@ -214,9 +214,11 @@ class TestNewProductsNotice:
             {"COD": "5010269900", "NAME": "روی سایت", "COD_ANB": "1",
              "NAME_ANB": "ا", "MOJ": "5", "GH_FO": "0"},
             {"COD": "5010269911", "NAME": "جدید", "COD_ANB": "1",
-             "NAME_ANB": "ا", "MOJ": "3", "GH_FO": "0"},
+             "NAME_ANB": "ا", "MOJ": "3", "GH_FO": "2500000"},
             {"COD": "5010269922", "NAME": "بدون موجودی", "COD_ANB": "1",
-             "NAME_ANB": "ا", "MOJ": "0", "GH_FO": "0"},
+             "NAME_ANB": "ا", "MOJ": "0", "GH_FO": "2500000"},
+            {"COD": "5010269933", "NAME": "بدون قیمت", "COD_ANB": "1",
+             "NAME_ANB": "ا", "MOJ": "4", "GH_FO": "0"},
         ]
         cal = write_dbf(tmp_path / "cal.DBF", CAL_FIELDS, rows)
         db.set_setting("haseb_cal_path", str(cal))
@@ -234,9 +236,41 @@ class TestNewProductsNotice:
         again = run_auto_sync(db, store, woo=woo)
         assert again.missing_on_site == 1 and again.newly_missing == 0
 
+    def _three_kinds(self, db, tmp_path):
+        rows = [
+            {"COD": "5010269911", "NAME": "هر دو", "COD_ANB": "1",
+             "NAME_ANB": "ا", "MOJ": "3", "GH_FO": "2500000"},
+            {"COD": "5010269922", "NAME": "فقط قیمت", "COD_ANB": "1",
+             "NAME_ANB": "ا", "MOJ": "0", "GH_FO": "2500000"},
+            {"COD": "5010269933", "NAME": "فقط موجودی", "COD_ANB": "1",
+             "NAME_ANB": "ا", "MOJ": "4", "GH_FO": "0"},
+        ]
+        db.set_setting("haseb_cal_path", str(write_dbf(tmp_path / "c.DBF", CAL_FIELDS, rows)))
+        db.set_setting("schedule_price", False)
+
+    @pytest.mark.parametrize("criteria, expected", [
+        ("both", ["5010269911"]),
+        ("stock", ["5010269911", "5010269933"]),
+        ("price", ["5010269911", "5010269922"]),
+    ])
+    def test_criteria_chosen_by_employer(self, db, store, tmp_path, criteria, expected):
+        self._three_kinds(db, tmp_path)
+        db.set_setting("new_products_criteria", criteria)
+        run_auto_sync(db, store, woo=FakeWoo([]))
+        assert sorted(db.get_setting("new_products_pending")) == expected
+
+    def test_price_criteria_uses_isaco_list_even_if_price_sync_off(self, db, store, tmp_path):
+        # کالا در حاسب قیمت ندارد ولی در لیست ایساکو هست → «قیمت دارد»
+        rows = [{"COD": "5010269900", "NAME": "کالا", "COD_ANB": "1",
+                 "NAME_ANB": "ا", "MOJ": "2", "GH_FO": "0"}]
+        db.set_setting("haseb_cal_path", str(write_dbf(tmp_path / "c.DBF", CAL_FIELDS, rows)))
+        db.set_setting("isaco_excel_path", str(make_isaco_xlsx(tmp_path / "p.xlsx")))
+        result = run_auto_sync(db, store, woo=FakeWoo([]), update_price=False)
+        assert result.ok and result.newly_missing == 1
+
     def test_sync_never_creates_products(self, db, store, tmp_path):
         rows = [{"COD": "5010269911", "NAME": "جدید", "COD_ANB": "1",
-                 "NAME_ANB": "ا", "MOJ": "3", "GH_FO": "0"}]
+                 "NAME_ANB": "ا", "MOJ": "3", "GH_FO": "2500000"}]
         db.set_setting("haseb_cal_path", str(write_dbf(tmp_path / "c.DBF", CAL_FIELDS, rows)))
 
         class NoCreateWoo(FakeWoo):

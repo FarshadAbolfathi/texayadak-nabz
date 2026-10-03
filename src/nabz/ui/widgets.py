@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -181,13 +181,65 @@ def selected_text(table) -> str:
     return "\n".join(lines)
 
 
+def copy_text(table) -> str:
+    """متنی که با Ctrl+C کپی می‌شود.
+
+    در جدول‌هایی که با کلیک کل ردیف انتخاب می‌شود، اگر فقط یک ردیف انتخاب
+    شده باشد همان خانهٔ زیر مکان‌نما کپی می‌شود (کاربر معمولاً کد یا نام را
+    می‌خواهد، نه کل ردیف)؛ چند ردیف → جدول کامل برای paste در اکسل.
+    """
+    from PySide6.QtWidgets import QAbstractItemView
+
+    rows = {i.row() for i in table.selectedItems()}
+    current = table.currentItem()
+    if (table.selectionBehavior() == QAbstractItemView.SelectionBehavior.SelectRows
+            and len(rows) <= 1 and current is not None):
+        return current.text()
+    return selected_text(table)
+
+
+#: کد کلید فیزیکی «C» در ویندوز؛ با صفحه‌کلید فارسی Qt کلید را «ز» می‌بیند و
+#: میان‌بر استاندارد Ctrl+C کار نمی‌کند، پس کلید فیزیکی را هم می‌سنجیم.
+_VK_C = 0x43
+
+
+class _CopyKeyFilter(QObject):
+    def __init__(self, table, copy):
+        super().__init__(table)
+        self._copy = copy
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - امضای Qt
+        kind = event.type()
+        if kind not in (QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride):
+            return False
+        if not is_copy_key(event):
+            return False
+        if kind == QEvent.Type.ShortcutOverride:
+            event.accept()          # میان‌برهای دیگر این کلید را نگیرند
+            return True
+        self._copy()
+        return True
+
+
+def is_copy_key(event) -> bool:
+    """Ctrl+C (با هر زبان صفحه‌کلید) یا Ctrl+Insert."""
+    mods = event.modifiers()
+    if not mods & Qt.KeyboardModifier.ControlModifier:
+        return False
+    if mods & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier):
+        return False
+    key = event.key()
+    return (key in (Qt.Key.Key_C, Qt.Key.Key_Insert)
+            or event.nativeVirtualKey() == _VK_C)
+
+
 def make_copyable(table, *, code_columns: tuple[int, ...] = (), on_copied=None) -> None:
-    """کپی با Ctrl+C و منوی راست‌کلیک به یک QTableWidget اضافه می‌کند.
+    """کپی با Ctrl+C (حتی با صفحه‌کلید فارسی) و منوی راست‌کلیک.
 
     :param code_columns: ستون‌های «کد»؛ در منو گزینهٔ «کپی کد» می‌گیرند.
     :param on_copied: تابعی که پیام کوتاه «کپی شد» را نمایش دهد.
     """
-    from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
+    from PySide6.QtGui import QGuiApplication
     from PySide6.QtWidgets import QMenu
 
     def copy(text: str) -> None:
@@ -195,13 +247,10 @@ def make_copyable(table, *, code_columns: tuple[int, ...] = (), on_copied=None) 
             return
         QGuiApplication.clipboard().setText(text)
         if on_copied:
-            on_copied(f"کپی شد: {text if len(text) < 60 else text[:60] + '…'}")
+            short = text.replace("\t", "  ").replace("\n", " ⏎ ")
+            on_copied(f"📋 کپی شد: {short if len(short) < 60 else short[:60] + '…'}")
 
-    action = QAction("کپی", table)
-    action.setShortcut(QKeySequence.StandardKey.Copy)
-    action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-    action.triggered.connect(lambda: copy(selected_text(table)))
-    table.addAction(action)
+    table.installEventFilter(_CopyKeyFilter(table, lambda: copy(copy_text(table))))
 
     def menu(pos) -> None:
         item = table.itemAt(pos)
@@ -225,3 +274,61 @@ def make_copyable(table, *, code_columns: tuple[int, ...] = (), on_copied=None) 
 
     table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     table.customContextMenuRequested.connect(menu)
+
+
+def setup_columns(table, widths: dict[int, int], *, db=None, key: str = "",
+                  fixed: tuple[int, ...] = (), stretch_last: bool = True) -> None:
+    """همهٔ ستون‌ها را با ماوس قابل تغییر عرض می‌کند و عرض‌ها را به خاطر می‌سپارد.
+
+    - کشیدن لبهٔ سرستون: تغییر عرض؛ دابل‌کلیک روی لبه: اندازهٔ متناسب با متن
+    - اگر جمع عرض‌ها از جدول بیشتر شد اسکرول افقی ظاهر می‌شود
+    - راست‌کلیک روی سرستون: «بازگشت به عرض‌های پیش‌فرض»
+    - با ``db`` و ``key`` عرض‌ها در تنظیمات ذخیره و دفعهٔ بعد بازیابی می‌شوند
+    """
+    from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QMenu
+
+    head = table.horizontalHeader()
+    head.setMinimumSectionSize(36)
+    head.setStretchLastSection(stretch_last)
+    for c in range(table.columnCount()):
+        mode = (QHeaderView.ResizeMode.Fixed if c in fixed
+                else QHeaderView.ResizeMode.Interactive)
+        head.setSectionResizeMode(c, mode)
+    table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+    table.setWordWrap(False)
+
+    def apply(values: dict[int, int]) -> None:
+        for c, w in values.items():
+            if 0 <= c < table.columnCount() and w > 0:
+                table.setColumnWidth(c, int(w))
+
+    saved = {}
+    if db is not None and key:
+        raw = db.get_setting(key, None)
+        if isinstance(raw, list) and len(raw) == table.columnCount():
+            saved = {c: w for c, w in enumerate(raw) if isinstance(w, int)}
+    apply({**widths, **saved})
+
+    if db is not None and key:
+        timer = QTimer(table)
+        timer.setSingleShot(True)
+        timer.setInterval(500)
+        timer.timeout.connect(lambda: db.set_setting(
+            key, [table.columnWidth(c) for c in range(table.columnCount())]))
+        head.sectionResized.connect(lambda *_: timer.start())
+
+    def reset() -> None:
+        apply(widths)
+        if db is not None and key:
+            db.set_setting(key, None)
+
+    def header_menu(pos) -> None:
+        m = QMenu(head)
+        m.addAction("↔️  بازگشت به عرض‌های پیش‌فرض", reset)
+        m.addAction("📐  عرض متناسب با متن (همهٔ ستون‌ها)",
+                    lambda: [table.resizeColumnToContents(c)
+                             for c in range(table.columnCount()) if c not in fixed])
+        m.exec(head.mapToGlobal(pos))
+
+    head.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    head.customContextMenuRequested.connect(header_menu)

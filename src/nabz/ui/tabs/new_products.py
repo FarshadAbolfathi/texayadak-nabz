@@ -1,9 +1,10 @@
 """تب محصولات جدید حاسب — کالاهای موجود در حاسب که روی سایت نیستند.
 
 جریان:
-۱) «مقایسهٔ حاسب با سایت»: کالاهای حاسب با موجودی بیشتر از صفر که هیچ
-   محصولی با همان کد روی سایت ندارند فهرست می‌شوند؛ قیمت (از ایساکو یا
-   حاسب) و دستهٔ پیشنهادی هم حساب می‌شود.
+۱) «مقایسهٔ حاسب با سایت»: کالاهای حاسب که هیچ محصولی با همان کد روی
+   سایت ندارند فهرست می‌شوند؛ قیمت (از ایساکو یا حاسب) و دستهٔ پیشنهادی
+   هم حساب می‌شود. کارفرما شرط نمایش را انتخاب می‌کند: «موجودی و قیمت»
+   (پیش‌فرض)، «فقط موجودی» یا «فقط قیمت» — بدون نیاز به مقایسهٔ دوباره.
 ۲) کارفرما عنوان، قیمت، موجودی و دسته را بازبینی/ویرایش می‌کند.
 ۳) با «ارسال به سایت» و تأیید، فقط ردیف‌های تیک‌خورده ساخته می‌شوند.
 
@@ -30,8 +31,10 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QButtonGroup,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -40,7 +43,17 @@ from PySide6.QtWidgets import (
 
 from ...config import CredentialStore
 from ...db import Database
-from ...new_products import NewProduct, build_candidates, find_missing, site_skus, to_woo_create
+from ...new_products import (
+    CRITERIA,
+    DEFAULT_CRITERIA,
+    NewProduct,
+    build_candidates,
+    find_missing,
+    matches_criteria,
+    price_for,
+    site_skus,
+    to_woo_create,
+)
 from ...skucode import digits_only
 from ..category_dialog import CategoryDialog
 from ..category_rules_dialog import CategoryRulesDialog
@@ -50,7 +63,7 @@ from ..services import (
     stock_rules_from_db,
     woo_client_from_store,
 )
-from ..widgets import Card, fa, make_copyable, money, muted
+from ..widgets import Card, fa, make_copyable, money, muted, setup_columns
 from ..workers import run_async
 
 
@@ -85,15 +98,23 @@ def _compare(db: Database, store: CredentialStore, all_warehouses: bool) -> dict
             isaco = {}
 
     ignored = db.get_setting("new_products_ignored", []) or []
-    missing = find_missing(haseb, site_skus(products, extra), ignored=ignored)
+    price_rules = price_rules_from_db(db)
+    # همهٔ غایب‌ها که «موجودی یا قیمت» دارند؛ فیلتر شرط انتخابی در خود جدول
+    # انجام می‌شود تا تغییر شرط بدون خواندن دوبارهٔ سایت اعمال شود.
+    missing = [
+        m for m in find_missing(haseb, site_skus(products, extra),
+                                ignored=ignored, min_quantity=None)
+        if m.quantity > 0 or price_for(m, isaco.get(m.code), price_rules)[0]
+    ]
     candidates = build_candidates(
         missing,
         isaco=isaco,
-        price_rules=price_rules_from_db(db),
+        price_rules=price_rules,
         stock_rules=stock_rules_from_db(db),
         categorizer=categorizer_from_db(db, categories),
     )
-    codes = [c.code for c in candidates]
+    criteria = db.get_setting("new_products_criteria", DEFAULT_CRITERIA)
+    codes = [c.code for c in candidates if matches_criteria(c, criteria)]
     db.set_setting("new_products_pending", codes)
     seen = set(db.get_setting("new_products_seen", []) or [])
     db.set_setting("new_products_seen", sorted(seen | set(codes)))
@@ -128,6 +149,7 @@ class NewProductsTab(QWidget):
         self.db = db
         self.store = store
         self._candidates: list[NewProduct] = []
+        self._compare_info: dict | None = None
         self._categories = []
         self._categorizer = None
         self._filling = False
@@ -177,11 +199,32 @@ class NewProductsTab(QWidget):
         rules_btn.clicked.connect(self._open_rules)
         row.addWidget(rules_btn, 1)
         toolbar.body().addLayout(row)
+
+        crit_row = QHBoxLayout()
+        crit_label = QLabel("شرط نمایش کالاهایی که روی سایت نیستند:")
+        crit_label.setObjectName("FieldLabel")
+        crit_row.addWidget(crit_label)
+        self.criteria_group = QButtonGroup(self)
+        self.criteria_buttons: dict[str, QRadioButton] = {}
+        saved = self.db.get_setting("new_products_criteria", DEFAULT_CRITERIA)
+        if saved not in CRITERIA:
+            saved = DEFAULT_CRITERIA
+        for key, label in CRITERIA.items():
+            btn = QRadioButton(label)
+            btn.setProperty("criteria", key)
+            btn.setChecked(key == saved)
+            self.criteria_group.addButton(btn)
+            self.criteria_buttons[key] = btn
+            crit_row.addWidget(btn)
+        crit_row.addStretch(1)
+        self.criteria_group.buttonToggled.connect(self._on_criteria_toggled)
+        toolbar.body().addLayout(crit_row)
         toolbar.add(muted(
-            "کالاهایی نشان داده می‌شوند که در حاسب موجودی دارند ولی هیچ محصولی با "
-            "همان کد روی سایت نیست. قیمت از لیست ایساکو (با همان درصد سود سینک) و "
-            "اگر نبود از قیمت فروش حاسب حساب می‌شود؛ دسته هم خودکار پیشنهاد "
-            "می‌شود. هیچ محصولی بدون تأیید شما روی سایت ساخته نمی‌شود."
+            "کالاهای حاسب که هیچ محصولی با همان کد روی سایت ندارند، با شرط بالا "
+            "نشان داده می‌شوند (پیش‌فرض: هم موجودی و هم قیمت داشته باشند). قیمت از "
+            "لیست ایساکو (با همان درصد سود سینک) و اگر نبود از قیمت فروش حاسب حساب "
+            "می‌شود؛ دسته هم خودکار پیشنهاد می‌شود. هیچ محصولی بدون تأیید شما روی "
+            "سایت ساخته نمی‌شود."
         ))
         layout.addWidget(toolbar)
 
@@ -195,7 +238,7 @@ class NewProductsTab(QWidget):
         filter_row = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("جستجو با نام یا کد ...")
-        self.search.textChanged.connect(self._filter)
+        self.search.textChanged.connect(lambda *_: self._apply_filters())
         filter_row.addWidget(self.search, 1)
         sel_all = QPushButton("انتخاب همه")
         sel_all.clicked.connect(lambda: self._set_all_checked(True))
@@ -216,12 +259,13 @@ class NewProductsTab(QWidget):
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked
             | QAbstractItemView.EditTrigger.EditKeyPressed)
-        head = self.table.horizontalHeader()
-        head.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnWidth(self.COL_CHECK, 40)
-        self.table.setColumnWidth(self.COL_CODE, 150)
-        self.table.setColumnWidth(self.COL_PRICE, 120)
-        self.table.setColumnWidth(self.COL_CATS, 220)
+        # همهٔ ستون‌ها با کشیدن لبهٔ سرستون قابل تغییر عرض‌اند (دابل‌کلیک روی
+        # لبه = اندازهٔ خودکار)؛ عرض‌ها برای دفعهٔ بعد هم ذخیره می‌شوند.
+        setup_columns(self.table, {
+            self.COL_CHECK: 40, self.COL_CODE: 130, self.COL_NAME: 420,
+            self.COL_PRICE: 120, self.COL_SOURCE: 90, self.COL_HASEB: 115,
+            self.COL_STOCK: 115, self.COL_CATS: 240, self.COL_WH: 140,
+        }, db=self.db, key="cols_new_products", fixed=(self.COL_CHECK,))
         from .products import MoneyDelegate
         self.table.setItemDelegateForColumn(self.COL_PRICE, MoneyDelegate(self.table))
         self.table.cellDoubleClicked.connect(self._on_double_click)
@@ -234,7 +278,9 @@ class NewProductsTab(QWidget):
         bottom.addWidget(QLabel("وضعیت محصول روی سایت:"))
         self.publish = QComboBox()
         self.publish.addItem("منتشر شود", "publish")
-        self.publish.addItem("پیش‌نویس (بعداً منتشر می‌کنم)", "draft")
+        self.publish.addItem("پیش‌نویس", "draft")
+        self.publish.setToolTip("پیش‌نویس: محصول ساخته می‌شود ولی تا انتشار دستی "
+                                "در سایت دیده نمی‌شود.")
         idx = self.publish.findData(self.db.get_setting("new_products_status", "publish"))
         self.publish.setCurrentIndex(max(idx, 0))
         self.publish.currentIndexChanged.connect(
@@ -253,8 +299,11 @@ class NewProductsTab(QWidget):
         self.send_btn.setMinimumHeight(44)
         self.send_btn.setEnabled(False)
         self.send_btn.clicked.connect(self._send)
-        bottom.addWidget(self.send_btn)
         layout.addLayout(bottom)
+        send_row = QHBoxLayout()
+        send_row.addStretch(1)
+        send_row.addWidget(self.send_btn)
+        layout.addLayout(send_row)
         layout.addWidget(muted(
             "برای ویرایش عنوان، قیمت یا موجودی روی خانه دابل‌کلیک کنید. "
             "دابل‌کلیک روی ستون «دسته‌بندی» پنجرهٔ انتخاب دسته را باز می‌کند."
@@ -296,23 +345,52 @@ class NewProductsTab(QWidget):
         self._candidates = result["candidates"]
         self._categories = result["categories"]
         self._categorizer = categorizer_from_db(self.db, self._categories)
+        self._compare_info = result
         self._fill()
-        no_price = sum(1 for c in self._candidates if not c.price)
-        no_cat = sum(1 for c in self._candidates if not c.category_ids)
-        text = (
-            f"{fa(len(self._candidates))} کالای جدید پیدا شد "
-            f"(از {fa(result['haseb_count'])} کالای حاسب و "
-            f"{fa(result['site_count'])} محصول سایت)."
-        )
+        self._apply_filters()
+        self.send_btn.setEnabled(bool(self._candidates))
+        self.refresh_banner()
+
+    def criteria(self) -> str:
+        btn = self.criteria_group.checkedButton()
+        return btn.property("criteria") if btn else DEFAULT_CRITERIA
+
+    def _on_criteria_toggled(self, button, checked: bool) -> None:
+        if not checked:
+            return
+        self.db.set_setting("new_products_criteria", self.criteria())
+        if self._candidates:
+            self._apply_filters()
+            self.db.set_setting("new_products_pending", [
+                c.code for c in self._candidates if matches_criteria(c, self.criteria())])
+            self.refresh_banner()
+
+    def _update_criteria_counts(self) -> None:
+        for key, btn in self.criteria_buttons.items():
+            label = CRITERIA[key]
+            if self._candidates:
+                n = sum(1 for c in self._candidates if matches_criteria(c, key))
+                label += f" ({fa(n)})"
+            btn.setText(label)
+
+    def _status_text(self) -> str:
+        info = self._compare_info
+        shown = [c for r, c in enumerate(self._candidates)
+                 if not self.table.isRowHidden(r)]
+        text = f"{fa(len(shown))} کالای جدید با شرط «{CRITERIA[self.criteria()]}»"
+        if info:
+            text += (f" (از {fa(info['haseb_count'])} کالای حاسب و "
+                     f"{fa(info['site_count'])} محصول سایت)")
+        text += "."
+        no_price = sum(1 for c in shown if not c.price)
+        no_cat = sum(1 for c in shown if not c.category_ids)
         if no_price:
             text += f"  {fa(no_price)} بدون قیمت."
         if no_cat:
             text += f"  {fa(no_cat)} بدون دسته."
-        if not result["isaco"]:
+        if info and not info["isaco"]:
             text += "  (فایل ایساکو تنظیم نشده؛ قیمت فقط از حاسب.)"
-        self.status.setText(text)
-        self.send_btn.setEnabled(bool(self._candidates))
-        self.refresh_banner()
+        return text
 
     def _fill(self) -> None:
         self._filling = True
@@ -331,7 +409,9 @@ class NewProductsTab(QWidget):
             code.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(r, self.COL_CODE, code)
 
-            self.table.setItem(r, self.COL_NAME, QTableWidgetItem(cand.name))
+            name = QTableWidgetItem(cand.name)
+            name.setToolTip(cand.name)
+            self.table.setItem(r, self.COL_NAME, name)
 
             price = QTableWidgetItem("" if cand.price is None else str(cand.price))
             price.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -394,6 +474,7 @@ class NewProductsTab(QWidget):
         cand = self._candidates[r]
         if c == self.COL_NAME:
             cand.name = item.text().strip()
+            item.setToolTip(cand.name)
         elif c == self.COL_PRICE:
             digits = digits_only(item.text())
             cand.price = int(digits) if digits else None
@@ -491,12 +572,19 @@ class NewProductsTab(QWidget):
             if answer == QMessageBox.StandardButton.Yes:
                 self._resuggest()
 
-    def _filter(self, text: str) -> None:
-        text = text.strip()
-        for r in range(self.table.rowCount()):
+    def _apply_filters(self) -> None:
+        """شرط انتخابی (موجودی/قیمت) + متن جستجو؛ ردیف‌های نامرتبط مخفی می‌شوند."""
+        text = self.search.text().strip()
+        criteria = self.criteria()
+        for r, cand in enumerate(self._candidates):
             code = self.table.item(r, self.COL_CODE).text()
             name = self.table.item(r, self.COL_NAME).text()
-            self.table.setRowHidden(r, bool(text) and text not in code and text not in name)
+            hide = not matches_criteria(cand, criteria) or (
+                bool(text) and text not in code and text not in name)
+            self.table.setRowHidden(r, hide)
+        self._update_criteria_counts()
+        if self._candidates or self._compare_info:
+            self.status.setText(self._status_text())
 
     # -- نادیده گرفتن ---------------------------------------------------
 
@@ -622,7 +710,7 @@ class NewProductsTab(QWidget):
         drop = set(rows)
         self._candidates = [c for i, c in enumerate(self._candidates) if i not in drop]
         self._fill()
-        self._filter(self.search.text())
+        self._apply_filters()
         self.send_btn.setEnabled(bool(self._candidates))
         self.refresh_banner()
 

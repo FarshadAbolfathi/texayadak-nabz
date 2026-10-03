@@ -46,15 +46,17 @@ def record_missing_products(
     haseb: dict,
     products: list,
     woo: WooClient | None = None,
+    isaco: dict | None = None,
 ) -> tuple[int, int]:
-    """کالاهای موجودِ حاسب که روی سایت نیستند را پیدا و ذخیره می‌کند.
+    """کالاهای حاسب که روی سایت نیستند را (با شرط انتخابی کارفرما در تب
+    «محصولات جدید حاسب»: موجودی/قیمت/هر دو) پیدا و ذخیره می‌کند.
 
     فقط «خبر» می‌دهد؛ هیچ محصولی نمی‌سازد. کدهایی که قبلاً اعلام شده‌اند
     یا کارفرما نادیده‌شان گرفته، دوباره «تازه» حساب نمی‌شوند.
 
     :returns: ``(تعداد کل جاافتاده‌ها، تعداد تازه‌ها)``
     """
-    from .new_products import find_missing, site_skus
+    from .new_products import DEFAULT_CRITERIA, select_missing, site_skus
 
     extra: list[str] = []
     if woo is not None:
@@ -65,7 +67,13 @@ def record_missing_products(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("متغیرهای محصول %s خوانده نشد: %s", p.id, exc)
     ignored = db.get_setting("new_products_ignored", []) or []
-    missing = find_missing(haseb, site_skus(products, extra), ignored=ignored)
+    criteria = db.get_setting("new_products_criteria", DEFAULT_CRITERIA)
+    if criteria != "stock" and not isaco:
+        isaco = _load_isaco_quietly(db)
+    missing = select_missing(
+        haseb, site_skus(products, extra),
+        criteria=criteria, isaco=isaco, price_rules=_price_rules(db), ignored=ignored,
+    )
     codes = [m.code for m in missing]
     seen = set(db.get_setting("new_products_seen", []) or [])
     fresh = [c for c in codes if c not in seen]
@@ -75,6 +83,18 @@ def record_missing_products(
         db.set_setting("new_products_unread", True)
         db.log("info", f"{len(fresh)} کالای جدید در حاسب پیدا شد که روی سایت نیست.")
     return len(codes), len(fresh)
+
+
+def _load_isaco_quietly(db: Database) -> dict:
+    """لیست ایساکو فقط برای تشخیص «قیمت دارد»؛ خطا سینک را خراب نمی‌کند."""
+    path = db.get_setting("isaco_excel_path", "")
+    if not (path and Path(path).is_file()):
+        return {}
+    try:
+        return load_isaco(path)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("لیست ایساکو برای محصولات جدید خوانده نشد: %s", exc)
+        return {}
 
 
 def _price_rules(db: Database):
@@ -207,7 +227,8 @@ def run_auto_sync(
     if haseb:
         try:
             # همان داده‌های همین اجرا؛ فقط برای خبر دادن، بدون ساخت محصول
-            missing, fresh = record_missing_products(db, haseb, products, woo)
+            missing, fresh = record_missing_products(
+                db, haseb, products, woo, isaco=isaco)
         except Exception as exc:  # noqa: BLE001 - نباید سینک را خراب کند
             _log.warning("بررسی محصولات جدید حاسب نشد: %s", exc, exc_info=True)
 

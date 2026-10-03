@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -48,7 +49,7 @@ from ...invoice import (
     status_name,
 )
 from ..services import woo_client_from_store
-from ..widgets import Card, fa, make_copyable, muted
+from ..widgets import Card, fa, make_copyable, muted, scrollable
 from ..workers import run_async
 
 PER_PAGE = 50
@@ -114,7 +115,14 @@ class OrdersTab(QWidget):
     # -- ساخت رابط ----------------------------------------------------
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
+        # کل تب داخل یک ناحیهٔ اسکرول است تا در صفحه‌های کوتاه (یا پنجرهٔ
+        # کوچک) پایین صفحه زیر لبه نرود؛ پنل اقدامات هم اسکرول جدا دارد.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        content = QWidget()
+        content.setMinimumHeight(760)
+        outer.addWidget(scrollable(content))
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
@@ -226,16 +234,23 @@ class OrdersTab(QWidget):
         self.open_btn.clicked.connect(self._open_in_admin)
         actions.add(self.open_btn)
         actions.body().addStretch(1)
-        actions.setMinimumWidth(300)
-        actions.setMaximumWidth(380)
-        detail_layout.addWidget(actions, 1)
+        actions_scroll = QScrollArea()
+        actions_scroll.setWidgetResizable(True)
+        actions_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        actions_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        actions_scroll.setWidget(actions)
+        actions_scroll.setMinimumWidth(320)
+        actions_scroll.setMaximumWidth(400)
+        self.detail.setMinimumHeight(240)
+        actions_scroll.setMinimumHeight(240)
+        detail_layout.addWidget(actions_scroll, 1)
 
         splitter.addWidget(detail)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
         splitter.setChildrenCollapsible(False)
-        self.table.setMinimumHeight(220)
-        splitter.setSizes([380, 420])
+        self.table.setMinimumHeight(200)
+        splitter.setSizes([340, 440])
         layout.addWidget(splitter, 1)
         self._fill_status_filter([])
         self._set_order_actions(False)

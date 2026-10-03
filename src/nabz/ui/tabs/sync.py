@@ -44,7 +44,7 @@ from ..services import (
     stock_rules_from_db,
     woo_client_from_store,
 )
-from ..widgets import Card, make_copyable, muted
+from ..widgets import Card, make_copyable, muted, setup_columns
 
 
 class CompareWorker(QObject):
@@ -241,11 +241,13 @@ class SyncTab(QWidget):
         # انتخاب خانه‌ای (نه ردیفی) تا بتوان فقط کد را انتخاب و کپی کرد
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.table.verticalHeader().setVisible(False)
-        head = self.table.horizontalHeader()
-        head.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeMode.Stretch)
-        # ستون کد آن‌قدر پهن که کد ۱۰ یا ۱۲ رقمی کامل دیده شود
-        head.setSectionResizeMode(self.COL_SKU, QHeaderView.ResizeMode.Interactive)
-        self.table.setColumnWidth(self.COL_SKU, 170)
+        # عرض همهٔ ستون‌ها با کشیدن لبهٔ سرستون قابل تغییر است و ذخیره می‌شود؛
+        # ستون کد آن‌قدر پهن که کد ۱۰ یا ۱۲ رقمی کامل دیده شود.
+        setup_columns(self.table, {
+            self.COL_SKU: 160, self.COL_NAME: 440, self.COL_CUR_PRICE: 130,
+            self.COL_NEW_PRICE: 130, self.COL_CUR_STOCK: 100, self.COL_NEW_STOCK: 100,
+            self.COL_STATUS: 150, self.COL_APPLY: 90,
+        }, db=self.db, key="cols_sync", stretch_last=False)
         self.table.cellDoubleClicked.connect(self._on_double_click)
         make_copyable(self.table, code_columns=(self.COL_SKU,),
                       on_copied=self.status.setText)

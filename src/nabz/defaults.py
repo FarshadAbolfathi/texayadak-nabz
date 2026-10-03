@@ -15,6 +15,9 @@ from __future__ import annotations
 DEFAULT_WOO_URL = ""
 DEFAULT_WOO_KEY = ""
 DEFAULT_WOO_SECRET = ""
+# وردپرس (Application Password) — برای آپلود تصویر محصول از کامپیوتر
+DEFAULT_WP_USER = ""
+DEFAULT_WP_APP_PASSWORD = ""
 
 # ایساکو (پورتال B2B)
 DEFAULT_ISACO_SCUS = ""

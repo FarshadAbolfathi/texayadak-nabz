@@ -36,15 +36,21 @@ def woo_client_from_store(store: CredentialStore) -> WooClient | None:
 
     اگر اعتبارنامه‌ها کامل نباشند، ``None`` برمی‌گرداند تا UI پیام مناسب بدهد.
     """
+    from ..defaults import DEFAULT_WP_APP_PASSWORD, DEFAULT_WP_USER
+
     creds = store.load_woo()
     if not (creds.base_url and creds.consumer_key and creds.consumer_secret):
         return None
+    # اگر کاربر رمز برنامهٔ وردپرس را وارد نکرده، پیش‌فرض داخل نسخهٔ نصبی
+    wp_user, wp_pass = creds.wp_user, creds.wp_app_password
+    if not (wp_user and wp_pass):
+        wp_user, wp_pass = DEFAULT_WP_USER, DEFAULT_WP_APP_PASSWORD
     return WooClient(WooConfig(
         base_url=creds.base_url,
         consumer_key=creds.consumer_key,
         consumer_secret=creds.consumer_secret,
-        wp_user=creds.wp_user,
-        wp_app_password=creds.wp_app_password,
+        wp_user=wp_user,
+        wp_app_password=wp_pass,
     ))
 
 

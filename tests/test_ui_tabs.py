@@ -155,6 +155,7 @@ class TestNewProductsTab:
         from nabz.ui.tabs.new_products import NewProductsTab
         db.set_setting("new_products_pending", ["0050102699", "0000012345"])
         db.set_setting("new_products_unread", True)
+        db.set_setting("new_products_criteria", "stock")
         tab = NewProductsTab(db, store)
         assert tab.unread_count() == 2
         tab._on_compared({"candidates": self.candidates(), "categories": CATS,
@@ -179,6 +180,7 @@ class TestNewProductsTab:
 
     def test_ignore_removes_rows(self, qapp, db, store):
         from nabz.ui.tabs.new_products import NewProductsTab
+        db.set_setting("new_products_criteria", "stock")
         tab = NewProductsTab(db, store)
         tab._on_compared({"candidates": self.candidates(), "categories": CATS,
                           "haseb_count": 2, "site_count": 0, "isaco": False})
@@ -186,6 +188,49 @@ class TestNewProductsTab:
         tab._ignore_selected()
         assert db.get_setting("new_products_ignored") == ["0000012345"]
         assert tab.table.rowCount() == 1
+
+    def test_criteria_radio_filters_without_recompare(self, qapp, db, store, captured):
+        from nabz.ui.tabs.new_products import NewProductsTab
+        cands = self.candidates() + [
+            NewProduct("0000099999", "فقط قیمت", 0, 0, 90_000, "ایساکو")]
+        tab = NewProductsTab(db, store)
+        assert tab.criteria() == "both"                     # پیش‌فرض: هر دو شرط
+        tab._on_compared({"candidates": cands, "categories": CATS,
+                          "haseb_count": 3, "site_count": 0, "isaco": True})
+        visible = lambda: [tab._candidates[r].code for r in range(tab.table.rowCount())
+                           if not tab.table.isRowHidden(r)]
+        assert visible() == ["0050102699"]
+        assert "(۱)" in tab.criteria_buttons["both"].text()
+        assert "(۲)" in tab.criteria_buttons["stock"].text()
+
+        tab.criteria_buttons["price"].setChecked(True)
+        assert visible() == ["0050102699", "0000099999"]
+        assert db.get_setting("new_products_criteria") == "price"
+        assert db.get_setting("new_products_pending") == ["0050102699", "0000099999"]
+
+        tab.criteria_buttons["stock"].setChecked(True)
+        assert visible() == ["0050102699", "0000012345"]
+        # ارسال فقط ردیف‌های قابل‌مشاهدهٔ تیک‌خورده
+        tab._send()
+        payloads = captured[-1]["args"][1]
+        assert [p["sku"] for p in payloads] == ["0050102699", "0000012345"]
+
+        # جستجو با شرط ترکیب می‌شود
+        tab.search.setText("پیچ")
+        assert visible() == ["0000012345"]
+
+    def test_columns_resizable_and_remembered(self, qapp, db, store):
+        from PySide6.QtWidgets import QHeaderView
+        from nabz.ui.tabs.new_products import NewProductsTab
+        tab = NewProductsTab(db, store)
+        head = tab.table.horizontalHeader()
+        assert head.sectionResizeMode(tab.COL_NAME) == QHeaderView.ResizeMode.Interactive
+        assert tab.table.columnWidth(tab.COL_NAME) >= 400
+        tab.table.setColumnWidth(tab.COL_NAME, 555)
+        db.set_setting("cols_new_products",
+                       [tab.table.columnWidth(c) for c in range(tab.table.columnCount())])
+        again = NewProductsTab(db, store)
+        assert again.table.columnWidth(again.COL_NAME) == 555
 
 
 ORDER = {
