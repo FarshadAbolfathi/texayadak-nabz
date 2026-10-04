@@ -98,6 +98,16 @@ jobs:
           path: packaging/Output/*.exe
           if-no-files-found: warn
 
+      # اثرانگشت فایل نصبی تا روی سیستم مقصد بشود سالم بودن دانلود را چک کرد
+      - name: محاسبهٔ SHA256 فایل نصبی
+        id: hash
+        shell: pwsh
+        run: |
+          $f = Get-ChildItem packaging/Output/*.exe | Select-Object -First 1
+          $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
+          "sha256=$h" >> $env:GITHUB_OUTPUT
+          "size=$($f.Length)" >> $env:GITHUB_OUTPUT
+
       # انتشار فایل نصبی در صفحهٔ Releases برای دانلود ساده‌تر
       - name: انتشار در Releases
         if: github.ref == 'refs/heads/main'
@@ -108,6 +118,13 @@ jobs:
           body: |
             فایل نصبی تکسایدک نبض.
             فایل `TexayadakNabz-Setup-*.exe` را دانلود و روی سیستم کارفرما نصب کنید.
+
+            اندازهٔ دقیق: `${{ steps.hash.outputs.size }}` بایت
+            SHA256: `${{ steps.hash.outputs.sha256 }}`
+
+            بررسی سالم بودن فایل روی ویندوز (در cmd، در پوشهٔ دانلود):
+            `certutil -hashfile TexayadakNabz-Setup-1.0.0.exe SHA256`
+            اگر عدد با بالا یکی نبود، فایل ناقص دانلود شده؛ دوباره دانلود کنید.
           files: |
             packaging/Output/*.exe
           fail_on_unmatched_files: false
