@@ -463,17 +463,11 @@ class SyncTab(QWidget):
             QMessageBox.critical(self, "خطا", f"بازگردانی ناموفق: {exc}")
 
     def _run_worker(self, worker: QObject, on_done) -> None:
-        thread = QThread()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(self.status.setText)
-        worker.done.connect(on_done)
-        worker.failed.connect(self._on_failed)
-        worker.done.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(thread.deleteLater)
-        self._thread, self._worker = thread, worker
-        thread.start()
+        from ..workers import start_worker
+        self._worker = worker
+        self._thread = start_worker(self, worker, on_done=on_done,
+                                    on_failed=self._on_failed,
+                                    on_progress=self.status.setText)
 
     def _on_failed(self, message: str) -> None:
         self._set_busy(False)

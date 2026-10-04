@@ -18,6 +18,7 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -27,16 +28,78 @@ from typing import Any, Iterator
 SCHEMA_VERSION = 1
 
 
+class _Result:
+    """نتیجهٔ کاملاً خوانده‌شدهٔ یک کوئری (تا خواندن ردیف‌ها بیرون از قفل نباشد)."""
+
+    __slots__ = ("_rows", "lastrowid", "rowcount")
+
+    def __init__(self, cursor: sqlite3.Cursor):
+        self._rows = cursor.fetchall()
+        self.lastrowid = cursor.lastrowid
+        self.rowcount = cursor.rowcount
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class _LockedConnection:
+    """اتصال SQLite مشترک بین نخ اصلی و نخ‌های سینک، با یک قفل.
+
+    نخ سینک (پس‌زمینه) و رابط کاربری (داشبورد، لاگ، تنظیمات) هم‌زمان از
+    یک اتصال استفاده می‌کنند؛ بدون قفل، استفادهٔ هم‌زمان از یک اتصال
+    پایتون می‌تواند برنامه را بی‌صدا (بدون لاگ) کرش کند.
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self.lock = threading.RLock()
+
+    def execute(self, sql: str, params=()) -> _Result:
+        with self.lock:
+            return _Result(self._conn.execute(sql, params))
+
+    def executemany(self, sql: str, seq) -> _Result:
+        with self.lock:
+            return _Result(self._conn.executemany(sql, seq))
+
+    def executescript(self, script: str) -> None:
+        with self.lock:
+            self._conn.executescript(script)
+
+    def commit(self) -> None:
+        with self.lock:
+            self._conn.commit()
+
+    def rollback(self) -> None:
+        with self.lock:
+            self._conn.rollback()
+
+    def close(self) -> None:
+        with self.lock:
+            self._conn.close()
+
+
 class Database:
-    """پوشش نازک روی SQLite با کمکِ کاربردی برای این برنامه."""
+    """پوشش نازک روی SQLite با کمکِ کاربردی برای این برنامه.
+
+    از چند نخ قابل استفاده است: همهٔ دسترسی‌ها پشت یک قفل‌اند و هر تراکنش
+    تا commit قفل را نگه می‌دارد.
+    """
 
     def __init__(self, path: str | Path):
         self.path = str(path)
         is_memory = self.path == ":memory:"
         if not is_memory:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        raw = sqlite3.connect(self.path, check_same_thread=False)
+        raw.row_factory = sqlite3.Row
+        self._conn = _LockedConnection(raw)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._migrate()
@@ -53,12 +116,13 @@ class Database:
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
         """یک تراکنش؛ در صورت خطا rollback می‌شود."""
-        try:
-            yield self._conn
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+        with self._conn.lock:
+            try:
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     # -- ساخت جدول‌ها --------------------------------------------------
 

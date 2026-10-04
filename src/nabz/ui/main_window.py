@@ -47,7 +47,6 @@ class PageTabs(QTabWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(page)
-        scroll.setProperty("page", page)
         return super().addTab(scroll, *args)
 
     def page(self, index: int):
@@ -451,15 +450,12 @@ class MainWindow(QMainWindow):
 
         worker = AutoSyncWorker(self.db, self.store, mode=mode,
                                 update_price=update_price, update_stock=update_stock)
-        thread = QThread()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.done.connect(self._on_auto_sync_done)
-        worker.done.connect(thread.quit)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._clear_sync_thread)
-        self._sync_thread, self._sync_worker = thread, worker
-        thread.start()
+        from .workers import start_worker
+        self._sync_worker = worker
+        self._sync_thread = start_worker(
+            self, worker, on_done=self._on_auto_sync_done,
+            on_progress=self.statusBar().showMessage,
+            on_finished=self._clear_sync_thread)
 
     def _clear_sync_thread(self) -> None:
         self._sync_thread = self._sync_worker = None

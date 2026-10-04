@@ -75,9 +75,66 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
 
     sys.excepthook = _excepthook
 
+    import threading
+
+    def _thread_excepthook(args):
+        logger.critical("خطای پیش‌بینی‌نشده در نخ %s", getattr(args.thread, "name", "?"),
+                        exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    threading.excepthook = _thread_excepthook
+
+    _enable_crash_log(logger)
+    _install_qt_message_handler(logger)
+
     _configured = True
     logger.info("=== شروع برنامه ===")
     return logger
+
+
+CRASH_FILE_NAME = "crash.log"
+_crash_file = None   # باید تا پایان برنامه باز بماند
+
+
+def _enable_crash_log(logger: logging.Logger) -> None:
+    """کرش‌های بومی (Qt/C++) هیچ لاگ پایتونی نمی‌گذارند؛ faulthandler در همان
+    لحظه ردِ اجرای همهٔ نخ‌ها را در crash.log می‌نویسد."""
+    global _crash_file
+    import faulthandler
+
+    try:
+        _crash_file = open(log_dir() / CRASH_FILE_NAME, "a", encoding="utf-8")  # noqa: SIM115
+        import datetime as _dt
+        _crash_file.write(f"\n=== اجرا {_dt.datetime.now():%Y-%m-%d %H:%M:%S} ===\n")
+        _crash_file.flush()
+        faulthandler.enable(file=_crash_file, all_threads=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.warning("ثبت کرش فعال نشد: %s", exc)
+
+
+def _install_qt_message_handler(logger: logging.Logger) -> None:
+    """هشدار و خطاهای داخلی Qt را هم وارد فایل لاگ می‌کند."""
+    try:
+        from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+    except ImportError:
+        return
+    levels = {
+        QtMsgType.QtDebugMsg: logging.DEBUG,
+        QtMsgType.QtInfoMsg: logging.INFO,
+        QtMsgType.QtWarningMsg: logging.WARNING,
+        QtMsgType.QtCriticalMsg: logging.ERROR,
+        QtMsgType.QtFatalMsg: logging.CRITICAL,
+    }
+    qt_log = logging.getLogger("nabz.qt")
+
+    def handler(mode, context, message) -> None:
+        level = levels.get(mode, logging.WARNING)
+        if level >= logging.WARNING:
+            qt_log.log(level, "%s", message)
+        if mode == QtMsgType.QtFatalMsg:
+            for h in logger.handlers:
+                h.flush()
+
+    qInstallMessageHandler(handler)
 
 
 def get_logger(name: str = "nabz") -> logging.Logger:
