@@ -85,18 +85,18 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss
 
-      - name: آپلود فایل اجرایی (پوشهٔ کامل)
+      # فایل نصبی اصلی در Releases منتشر می‌شود؛ این Artifact فقط پشتیبان
+      # کوتاه‌مدت است. پر شدن سهمیهٔ Artifact گیت‌هاب نباید انتشار را متوقف کند
+      # (ساخت ۱۷ به همین دلیل شکست خورد). پوشهٔ کامل exe دیگر آپلود نمی‌شود.
+      - name: آپلود فایل نصبی (پشتیبان کوتاه‌مدت)
         uses: actions/upload-artifact@v4
-        with:
-          name: TexayadakNabz-exe
-          path: dist/TexayadakNabz/
-
-      - name: آپلود فایل نصبی
-        uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: TexayadakNabz-Setup
           path: packaging/Output/*.exe
           if-no-files-found: warn
+          retention-days: 1
+          compression-level: 0
 
       # اثرانگشت فایل نصبی تا روی سیستم مقصد بشود سالم بودن دانلود را چک کرد
       - name: محاسبهٔ SHA256 فایل نصبی
