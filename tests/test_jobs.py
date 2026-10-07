@@ -142,46 +142,70 @@ class TestAutoDownload:
         # تنظیمات نباید با مسیر نامعتبر خراب شده باشد
         assert db.get_setting("isaco_excel_path") is None
 
-    def test_successful_download_saves_path_setting(self, db, monkeypatch, tmp_path):
+    @pytest.fixture
+    def isaco_store(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("nabz.jobs.isaco_dir", lambda: tmp_path / "isaco")
+        (tmp_path / "isaco").mkdir()
         store = CredentialStore(backend=MemoryBackend())
-        store.save_isaco(IsacoCredentialsConfig(
-            scus="1", username="2", password="3"))
-        fake_file = tmp_path / "downloaded.xlsx"
-        fake_file.write_bytes(b"fake")
+        store.save_isaco(IsacoCredentialsConfig(scus="1", username="2", password="3"))
+        return store
 
-        class FakeDownloader:
-            def __init__(self, *a, **k):
-                pass
-
-            def download(self, dest, timeout_s=240):
-                return str(fake_file)
-
-        monkeypatch.setattr(
-            "nabz.sources.isaco_browser.IsacoDownloader", FakeDownloader
-        )
-        result = try_auto_download_isaco(db, store)
-        assert result == str(fake_file)
-        assert db.get_setting("isaco_excel_path") == str(fake_file)
-
-    def test_progress_callback_is_forwarded(self, db, monkeypatch):
-        store = CredentialStore(backend=MemoryBackend())
-        store.save_isaco(IsacoCredentialsConfig(
-            scus="1", username="2", password="3"))
-        seen = []
-
+    def _downloader(self, monkeypatch, write):
         class FakeDownloader:
             def __init__(self, scus, username, password, on_progress=None):
                 self.on_progress = on_progress
 
             def download(self, dest, timeout_s=240):
-                self.on_progress("در حال کار ...")
+                if self.on_progress:
+                    self.on_progress("در حال کار ...")
+                write(dest)
                 return dest
 
-        monkeypatch.setattr(
-            "nabz.sources.isaco_browser.IsacoDownloader", FakeDownloader
-        )
-        try_auto_download_isaco(db, store, on_progress=seen.append)
-        assert seen == ["در حال کار ..."]
+        monkeypatch.setattr("nabz.sources.isaco_browser.IsacoDownloader", FakeDownloader)
+
+    def test_successful_download_is_validated_and_saved(self, db, monkeypatch,
+                                                        isaco_store, tmp_path):
+        self._downloader(monkeypatch, make_isaco_xlsx)
+        result = try_auto_download_isaco(db, isaco_store)
+        final = tmp_path / "isaco" / "isaco_pricelist.xlsx"
+        assert result == str(final) and final.is_file()
+        assert db.get_setting("isaco_excel_path") == str(final)
+        # فایل موقت دانلود باقی نمی‌ماند
+        assert not (tmp_path / "isaco" / "isaco_pricelist.downloading.xlsx").exists()
+
+    def test_broken_download_keeps_previous_good_list(self, db, monkeypatch,
+                                                      isaco_store, tmp_path):
+        """باگ واقعی: دانلود نیمه‌کاره لیست سالم را خراب می‌کرد → همهٔ کالاها
+        بی‌قیمت → در تب حاسب فقط یک کالا می‌آمد."""
+        self._downloader(monkeypatch, make_isaco_xlsx)
+        good = try_auto_download_isaco(db, isaco_store)
+        before = open(good, "rb").read()
+
+        self._downloader(monkeypatch, lambda dest: open(dest, "wb").write(b"PK\x03\x04 nim"))
+        assert try_auto_download_isaco(db, isaco_store) is None
+        assert db.get_setting("isaco_excel_path") == good
+        assert open(good, "rb").read() == before
+
+    def test_too_small_list_is_rejected(self, db, monkeypatch, isaco_store):
+        from openpyxl import Workbook
+
+        from nabz.sources.isaco_excel import EXPECTED_HEADERS
+
+        def tiny(dest):
+            wb = Workbook()
+            wb.active.append(list(EXPECTED_HEADERS))
+            wb.active.append(["5010269900", "کالا", "پژو", "عدد", 1, 1, 2, 1])
+            wb.save(dest)
+
+        self._downloader(monkeypatch, tiny)
+        assert try_auto_download_isaco(db, isaco_store) is None
+        assert db.get_setting("isaco_excel_path") is None
+
+    def test_progress_callback_is_forwarded(self, db, monkeypatch, isaco_store):
+        seen = []
+        self._downloader(monkeypatch, make_isaco_xlsx)
+        try_auto_download_isaco(db, isaco_store, on_progress=seen.append)
+        assert seen[0] == "در حال کار ..."
 
 
 class TestAutoSyncMode:

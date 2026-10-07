@@ -166,10 +166,17 @@ class IsacoDownloader:
             self._emit("در حال دانلود فایل لیست قیمت ...")
 
             def finished():
-                if item.isFinished():
-                    self._result_path = str(dest_path)
-                    self._done = True
-                    loop.quit()
+                if not item.isFinished():
+                    return
+                from PySide6.QtWebEngineCore import QWebEngineDownloadRequest
+                if item.state() != QWebEngineDownloadRequest.DownloadState.DownloadCompleted:
+                    # دانلودِ قطع/لغوشده هم «تمام» حساب می‌شود؛ نباید آن را
+                    # به‌جای لیست قیمت سالم قبول کنیم
+                    fail(f"دانلود فایل ناقص ماند ({item.interruptReasonString()})")
+                    return
+                self._result_path = str(dest_path)
+                self._done = True
+                loop.quit()
 
             item.isFinishedChanged.connect(finished)
 

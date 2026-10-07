@@ -292,3 +292,37 @@ def load_warehouses(anb_path: str | Path) -> dict[int, str]:
             except ValueError:
                 continue
     return result
+
+
+@dataclass(slots=True)
+class WarehouseInfo:
+    """یک انبار حاسب با آمار کالاهایش (برای انتخاب انبار در برنامه)."""
+
+    id: int
+    name: str
+    items: int = 0          # تعداد ردیف کالا
+    in_stock: int = 0       # ردیف‌های با موجودی بیشتر از صفر
+
+
+def list_warehouses(cal_path: str | Path) -> list[WarehouseInfo]:
+    """انبارهایی که در جدول کالا (``cal.DBF``) آمده‌اند، با تعداد کالا.
+
+    مستقیم از ستون‌های ``COD_ANB``/``NAME_ANB`` همان جدول کالا خوانده
+    می‌شود (فقط خواندنی) تا به فایل جدای انبارها نیازی نباشد.
+    """
+    found: dict[int, WarehouseInfo] = {}
+    with DbfReader(cal_path) as reader:
+        for row in reader.rows(fields=["COD_ANB", "NAME_ANB", "MOJ"]):
+            try:
+                wid = int(row["COD_ANB"] or 0)
+            except ValueError:
+                continue
+            info = found.get(wid)
+            if info is None:
+                info = found[wid] = WarehouseInfo(wid, row["NAME_ANB"].strip())
+            elif not info.name:
+                info.name = row["NAME_ANB"].strip()
+            info.items += 1
+            if _to_decimal(row["MOJ"]) > 0:
+                info.in_stock += 1
+    return sorted(found.values(), key=lambda w: w.id)

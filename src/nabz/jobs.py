@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import logging
-import tempfile
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -66,6 +66,12 @@ def record_missing_products(
                     extra.extend(woo.fetch_variation_skus(p.id))
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("متغیرهای محصول %s خوانده نشد: %s", p.id, exc)
+    # انبارهایی که کارفرما در تب «محصولات جدید حاسب» انتخاب کرده
+    chosen_wh = db.get_setting("new_products_warehouses", None)
+    haseb_path = db.get_setting("haseb_cal_path", "")
+    if chosen_wh and haseb_path and Path(haseb_path).is_file():
+        haseb = load_haseb(haseb_path, warehouses={int(i) for i in chosen_wh})
+
     ignored = db.get_setting("new_products_ignored", []) or []
     criteria = db.get_setting("new_products_criteria", DEFAULT_CRITERIA)
     if criteria != "stock" and not isaco:
@@ -137,18 +143,42 @@ def try_auto_download_isaco(
     except ImportError as exc:
         _log.warning("موتور مرورگر در دسترس نیست: %s", exc)
         return None
+    # دانلود اول در یک فایل جدا انجام و بررسی می‌شود؛ فقط اگر سالم و کامل
+    # بود جای لیست قبلی را می‌گیرد. قبلاً مستقیم روی همان فایل (در پوشهٔ
+    # موقت ویندوز) دانلود می‌شد و یک دانلود نیمه‌کاره لیست سالم را خراب
+    # می‌کرد → همهٔ کالاها «بی‌قیمت» می‌شدند.
+    folder = isaco_dir()
+    staging = folder / "isaco_pricelist.downloading.xlsx"
+    final = folder / "isaco_pricelist.xlsx"
     try:
-        dest = str(Path(tempfile.gettempdir()) / "isaco_pricelist.xlsx")
+        staging.unlink(missing_ok=True)
         downloader = IsacoDownloader(
             creds.scus, creds.username, creds.password, on_progress=on_progress
         )
-        path = downloader.download(dest)
-        db.set_setting("isaco_excel_path", path)
-        _log.info("دانلود خودکار ایساکو موفق: %s", path)
-        return path
+        path = Path(downloader.download(str(staging)))
+        if on_progress:
+            on_progress("در حال بررسی سالم بودن فایل لیست قیمت ...")
+        items = load_isaco(path)          # محافظ تعداد ردیف و قیمت داخل load است
+        os.replace(path, final)
+        db.set_setting("isaco_excel_path", str(final))
+        _log.info("دانلود خودکار ایساکو موفق: %s (%s قلم)", final, len(items))
+        return str(final)
     except Exception as exc:  # noqa: BLE001 - هرگز نباید سینک را متوقف کند
-        _log.warning("دانلود خودکار ایساکو نشد: %s", exc, exc_info=True)
+        _log.warning("دانلود خودکار ایساکو نشد (لیست قبلی حفظ شد): %s", exc,
+                     exc_info=True)
+        try:
+            staging.unlink(missing_ok=True)
+        except OSError:
+            pass
         return None
+
+
+def isaco_dir() -> Path:
+    """پوشهٔ دائمی لیست قیمت ایساکو (نه پوشهٔ موقت ویندوز که پاک‌سازی می‌شود)."""
+    from .logging_setup import LOG_DIR_NAME
+    path = Path.home() / LOG_DIR_NAME / "isaco"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def run_auto_sync(

@@ -48,6 +48,7 @@ from ...new_products import (
     DEFAULT_CRITERIA,
     NewProduct,
     build_candidates,
+    clean_title,
     find_missing,
     matches_criteria,
     price_for,
@@ -67,7 +68,21 @@ from ..widgets import Card, fa, make_copyable, money, muted, setup_columns
 from ..workers import run_async
 
 
-def _compare(db: Database, store: CredentialStore, all_warehouses: bool) -> dict:
+WAREHOUSES_KEY = "new_products_warehouses"     # فهرست کد انبار؛ None = همه
+WAREHOUSE_NAMES_KEY = "haseb_warehouse_names"   # کش نام انبارها برای برچسب دکمه
+
+
+def _list_warehouses(db: Database):
+    from ...sources.haseb_dbf import list_warehouses
+
+    haseb_path = db.get_setting("haseb_cal_path", "")
+    if not (haseb_path and Path(haseb_path).is_file()):
+        raise RuntimeError("مسیر فایل حاسب (cal.DBF) در تنظیمات تعیین نشده یا پیدا نشد.")
+    return list_warehouses(haseb_path)
+
+
+def _compare(db: Database, store: CredentialStore,
+             warehouses: list[int] | None = None) -> dict:
     """در پس‌زمینه: حاسب + سایت + (اختیاری) ایساکو → فهرست محصولات جدید."""
     from ...sources.haseb_dbf import load_products as load_haseb
     from ...sources.isaco_excel import load as load_isaco
@@ -79,7 +94,6 @@ def _compare(db: Database, store: CredentialStore, all_warehouses: bool) -> dict
     if woo is None:
         raise RuntimeError("اطلاعات اتصال ووکامرس در تنظیمات کامل نیست.")
 
-    warehouses = None if all_warehouses else db.get_setting("isaco_warehouses", None)
     haseb = load_haseb(haseb_path, warehouses=set(warehouses) if warehouses else None)
 
     products = woo.fetch_products()
@@ -89,13 +103,21 @@ def _compare(db: Database, store: CredentialStore, all_warehouses: bool) -> dict
             extra.extend(woo.fetch_variation_skus(p.id))
     categories = woo.fetch_categories()
 
+    # لیست ایساکو منبع اصلی «قیمت» است (قیمت فروش حاسب در این نصب صفر است)؛
+    # خطای خواندنش نباید پنهان بماند، وگرنه همهٔ کالاها بی‌قیمت می‌شوند و
+    # با شرط «موجودی و قیمت» تقریباً هیچ کالایی نمی‌آید.
     isaco = {}
+    isaco_error = ""
     isaco_path = db.get_setting("isaco_excel_path", "")
-    if isaco_path and Path(isaco_path).is_file():
+    if not isaco_path:
+        isaco_error = "مسیر فایل لیست قیمت ایساکو تنظیم نشده است."
+    elif not Path(isaco_path).is_file():
+        isaco_error = f"فایل لیست قیمت ایساکو پیدا نشد: {isaco_path}"
+    else:
         try:
             isaco = load_isaco(isaco_path)
-        except Exception:  # noqa: BLE001 - قیمت ایساکو اختیاری است
-            isaco = {}
+        except Exception as exc:  # noqa: BLE001
+            isaco_error = f"فایل لیست قیمت ایساکو خراب یا ناقص است: {exc}"
 
     ignored = db.get_setting("new_products_ignored", []) or []
     price_rules = price_rules_from_db(db)
@@ -125,6 +147,8 @@ def _compare(db: Database, store: CredentialStore, all_warehouses: bool) -> dict
         "haseb_count": len(haseb),
         "site_count": len(products),
         "isaco": bool(isaco),
+        "isaco_error": isaco_error,
+        "isaco_count": len(isaco),
     }
 
 
@@ -133,6 +157,69 @@ def _create(store: CredentialStore, payloads: list[dict]):
     if woo is None:
         raise RuntimeError("اطلاعات اتصال ووکامرس کامل نیست.")
     return woo.batch_create(payloads)
+
+
+class WarehouseDialog(QDialog):
+    """انتخاب انبارهای حاسب برای مقایسه (همه تیک‌خورده = همهٔ انبارها)."""
+
+    def __init__(self, warehouses, selected: list[int] | None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("انتخاب انبارهای حاسب")
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.resize(460, 480)
+        lay = QVBoxLayout(self)
+        lay.addWidget(muted(
+            "فقط کالاهای انبارهای تیک‌خورده با سایت مقایسه می‌شوند. اگر یک کالا "
+            "در چند انبار باشد، موجودی انبارهای انتخابی جمع می‌شود."))
+        self.list = QListWidget()
+        chosen = set(selected or [])
+        for w in warehouses:
+            name = clean_title(w.name) or "بی‌نام"
+            item = QListWidgetItem(
+                f"{name}  (کد {fa(w.id)} — {fa(w.items)} کالا، {fa(w.in_stock)} موجود)")
+            item.setData(Qt.ItemDataRole.UserRole, w.id)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            on = not chosen or w.id in chosen
+            item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+            self.list.addItem(item)
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        all_btn = QPushButton("همه")
+        all_btn.clicked.connect(lambda: self._set_all(True))
+        none_btn = QPushButton("هیچ‌کدام")
+        none_btn.clicked.connect(lambda: self._set_all(False))
+        row.addWidget(all_btn)
+        row.addWidget(none_btn)
+        row.addStretch(1)
+        ok = QPushButton("تأیید")
+        ok.setObjectName("Primary")
+        ok.clicked.connect(self._accept)
+        cancel = QPushButton("انصراف")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        lay.addLayout(row)
+
+    def _items(self):
+        return [self.list.item(i) for i in range(self.list.count())]
+
+    def _set_all(self, on: bool) -> None:
+        state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
+        for item in self._items():
+            item.setCheckState(state)
+
+    def _accept(self) -> None:
+        if not any(i.checkState() == Qt.CheckState.Checked for i in self._items()):
+            QMessageBox.warning(self, "انبار", "حداقل یک انبار را انتخاب کنید.")
+            return
+        self.accept()
+
+    def selected_ids(self) -> list[int] | None:
+        """فهرست کد انبارهای انتخابی؛ اگر همه تیک خورده باشند ``None``."""
+        items = self._items()
+        ids = [int(i.data(Qt.ItemDataRole.UserRole)) for i in items
+               if i.checkState() == Qt.CheckState.Checked]
+        return None if len(ids) == len(items) else ids
 
 
 class NewProductsTab(QWidget):
@@ -186,14 +273,12 @@ class NewProductsTab(QWidget):
         self.compare_btn.clicked.connect(self.compare)
         row.addWidget(self.compare_btn, 2)
 
-        self.all_wh = QCheckBox("همهٔ انبارهای حاسب")
-        self.all_wh.setToolTip(
-            "خاموش: فقط انبارهایی که برای سینک تعیین شده‌اند.\n"
-            "روشن: کالاهای همهٔ انبارها بررسی می‌شوند.")
-        self.all_wh.setChecked(bool(self.db.get_setting("new_products_all_wh", False)))
-        self.all_wh.toggled.connect(
-            lambda on: self.db.set_setting("new_products_all_wh", on))
-        row.addWidget(self.all_wh)
+        self.wh_btn = QPushButton()
+        self.wh_btn.setToolTip("انتخاب انبارهای حاسب که در مقایسه بررسی شوند")
+        self.wh_btn.clicked.connect(self._pick_warehouses)
+        self._warehouses = None
+        self._update_wh_button()
+        row.addWidget(self.wh_btn, 1)
 
         rules_btn = QPushButton("🏷  تنظیم دسته‌بندی خودکار")
         rules_btn.clicked.connect(self._open_rules)
@@ -337,8 +422,54 @@ class NewProductsTab(QWidget):
 
     def compare(self) -> None:
         self._set_busy(True, "در حال خواندن حاسب، محصولات و دسته‌های سایت ...")
-        run_async(self, _compare, self.db, self.store, self.all_wh.isChecked(),
+        run_async(self, _compare, self.db, self.store, self.selected_warehouses(),
                   on_done=self._on_compared, on_failed=self._on_failed)
+
+    # -- انبارها --------------------------------------------------------
+
+    def selected_warehouses(self) -> list[int] | None:
+        ids = self.db.get_setting(WAREHOUSES_KEY, None)
+        return [int(i) for i in ids] if ids else None
+
+    def _update_wh_button(self) -> None:
+        ids = self.selected_warehouses()
+        names = self.db.get_setting(WAREHOUSE_NAMES_KEY, {}) or {}
+        if not ids:
+            label = "همهٔ انبارها"
+        elif len(ids) == 1:
+            label = names.get(str(ids[0])) or f"انبار {fa(ids[0])}"
+        else:
+            label = f"{fa(len(ids))} انبار"
+        self.wh_btn.setText(f"🏬  انبار حاسب: {label}")
+
+    def _pick_warehouses(self) -> None:
+        if self._warehouses is None:
+            self.wh_btn.setEnabled(False)
+            self.status.setText("در حال خواندن انبارهای حاسب ...")
+
+            def loaded(result) -> None:
+                self.wh_btn.setEnabled(True)
+                self.status.setText("")
+                self._warehouses = result
+                self.db.set_setting(WAREHOUSE_NAMES_KEY,
+                                    {str(w.id): clean_title(w.name) for w in result})
+                self._pick_warehouses()
+
+            def failed(message: str) -> None:
+                self.wh_btn.setEnabled(True)
+                self._on_failed(message)
+
+            run_async(self, _list_warehouses, self.db, on_done=loaded, on_failed=failed)
+            return
+
+        dlg = WarehouseDialog(self._warehouses, self.selected_warehouses(), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        ids = dlg.selected_ids()
+        self.db.set_setting(WAREHOUSES_KEY, ids)
+        self._update_wh_button()
+        if self._candidates:
+            self.status.setText("انبارها عوض شد؛ برای اعمال، دوباره «مقایسه» را بزنید.")
 
     def _on_compared(self, result: dict) -> None:
         self._set_busy(False)
@@ -348,6 +479,14 @@ class NewProductsTab(QWidget):
         self._compare_info = result
         self._fill()
         self._apply_filters()
+        if result.get("isaco_error") and self.criteria() != "stock":
+            QMessageBox.warning(
+                self, "لیست قیمت ایساکو",
+                f"{result['isaco_error']}\n\n"
+                "بدون لیست ایساکو تقریباً هیچ کالایی «قیمت» ندارد، برای همین با شرط "
+                f"«{CRITERIA[self.criteria()]}» فهرست خیلی کوتاه می‌شود.\n\n"
+                "راه حل: در تب «سینک ایساکو» دکمهٔ «دریافت و مقایسه» را بزنید تا "
+                "لیست تازه دانلود شود، بعد اینجا دوباره مقایسه کنید.")
         self.send_btn.setEnabled(bool(self._candidates))
         self.refresh_banner()
 
@@ -388,8 +527,8 @@ class NewProductsTab(QWidget):
             text += f"  {fa(no_price)} بدون قیمت."
         if no_cat:
             text += f"  {fa(no_cat)} بدون دسته."
-        if info and not info["isaco"]:
-            text += "  (فایل ایساکو تنظیم نشده؛ قیمت فقط از حاسب.)"
+        if info and info.get("isaco_error"):
+            text += f"\n⚠️ {info['isaco_error']} قیمت فقط از حاسب گرفته شد."
         return text
 
     def _fill(self) -> None:
