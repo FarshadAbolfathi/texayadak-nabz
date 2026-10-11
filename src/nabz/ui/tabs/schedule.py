@@ -19,8 +19,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTableWidget,
-    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -29,6 +29,54 @@ from ... import jalali
 from ...db import Database
 from ...scheduler import ScheduleConfig, ScheduleEntry, next_entry_at
 from ..widgets import Card, muted, scrollable
+
+
+class HourMinuteEdit(QWidget):
+    """انتخاب ساعت اجرا با دو کادر جدا و برچسب‌دار: «ساعت» و «دقیقه».
+
+    ⚠️ چرا QTimeEdit نه: وقتی کل برنامه راست‌به‌چپ است، QTimeEdit همیشه
+    «دقیقه:ساعت» نشان می‌دهد (مستقل از جهت خود کادر و زبان)؛ کارفرما «۰۸:۰۰»
+    می‌دید ولی ۰۰:۰۸ ذخیره می‌شد و همهٔ اجراهای روز نزدیک نیمه‌شب انجام می‌شد.
+    با برچسب صریح هیچ ابهامی نمی‌ماند.
+
+    همان رابط QTimeEdit را دارد (``time``، ``setTime``، ``timeChanged``).
+    """
+
+    timeChanged = Signal(QTime)
+
+    def __init__(self, value: QTime | None = None, parent: QWidget | None = None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self.hour = QSpinBox()
+        self.hour.setRange(0, 23)
+        self.hour.setWrapping(True)
+        self.hour.setToolTip("ساعت (۰ تا ۲۳) — مثلاً ۸ یعنی ۸ صبح، ۲۰ یعنی ۸ شب")
+        self.minute = QSpinBox()
+        self.minute.setRange(0, 59)
+        self.minute.setWrapping(True)
+        self.minute.setToolTip("دقیقه (۰ تا ۵۹)")
+        for box in (self.hour, self.minute):
+            box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            box.setMinimumWidth(70)
+            box.setMaximumWidth(80)
+            box.valueChanged.connect(lambda *_: self.timeChanged.emit(self.time()))
+        for text, box in (("ساعت", self.hour), ("دقیقه", self.minute)):
+            label = QLabel(text)
+            label.setObjectName("FieldLabel")
+            label.setMinimumWidth(label.sizeHint().width())
+            lay.addWidget(label)
+            lay.addWidget(box)
+        if value is not None:
+            self.setTime(value)
+
+    def time(self) -> QTime:
+        return QTime(self.hour.value(), self.minute.value())
+
+    def setTime(self, value: QTime) -> None:  # noqa: N802 - مثل QTimeEdit
+        self.hour.setValue(value.hour())
+        self.minute.setValue(value.minute())
 
 
 def _centered(widget: QWidget) -> QWidget:
@@ -78,6 +126,9 @@ class ScheduleTab(QWidget):
         head = self.table.horizontalHeader()
         for c in range(len(self.HEADERS)):
             head.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
+        # ستون ساعت جای برچسب «ساعت» و «دقیقه» و دو کادر عددی را لازم دارد
+        head.setSectionResizeMode(self.COL_TIME, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(self.COL_TIME, 300)
         card.add(self.table)
 
         buttons = QHBoxLayout()
@@ -131,10 +182,8 @@ class ScheduleTab(QWidget):
         on.setChecked(entry.enabled)
         self.table.setCellWidget(r, self.COL_ON, _centered(on))
 
-        time_edit = QTimeEdit(QTime(entry.hour, entry.minute))
-        time_edit.setDisplayFormat("HH:mm")
-        time_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.table.setCellWidget(r, self.COL_TIME, time_edit)
+        time_edit = HourMinuteEdit(QTime(entry.hour, entry.minute))
+        self.table.setCellWidget(r, self.COL_TIME, _centered(time_edit))
 
         price = QCheckBox()
         price.setChecked(entry.price)
@@ -163,6 +212,9 @@ class ScheduleTab(QWidget):
                 break
         self._refresh_next()
 
+    def time_edit(self, r: int) -> HourMinuteEdit:
+        return self.table.cellWidget(r, self.COL_TIME).findChild(HourMinuteEdit)
+
     def _check(self, r: int, col: int) -> bool:
         box = self.table.cellWidget(r, col).findChild(QCheckBox)
         return bool(box and box.isChecked())
@@ -170,7 +222,7 @@ class ScheduleTab(QWidget):
     def entries(self) -> list[ScheduleEntry]:
         result = []
         for r in range(self.table.rowCount()):
-            t = self.table.cellWidget(r, self.COL_TIME).time()
+            t = self.time_edit(r).time()
             result.append(ScheduleEntry(
                 hour=t.hour(),
                 minute=t.minute(),

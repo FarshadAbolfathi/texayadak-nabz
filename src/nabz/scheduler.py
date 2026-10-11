@@ -123,6 +123,34 @@ class ScheduleConfig:
         return cls(enabled=enabled, entries=entries)
 
 
+def fix_rtl_swapped_entries(
+    entries: tuple[ScheduleEntry, ...] | list[ScheduleEntry],
+) -> tuple[list[ScheduleEntry], bool]:
+    """ساعت‌هایی که با اشکال نمایشی کادر ساعت (RTL) ذخیره شده‌اند را درست می‌کند.
+
+    در نسخه‌های قبل، کادر ساعت در حالت راست‌به‌چپ «دقیقه:ساعت» نشان می‌داد؛
+    کارفرما «۰۸:۰۰» می‌دید ولی ۰۰:۰۸ ذخیره می‌شد. چون هر مقدار ذخیره‌شده دقیقاً
+    به شکل جابه‌جا دیده شده بود، منظور واقعی = جابه‌جای مقدار ذخیره‌شده (اگر
+    «دقیقهٔ» ذخیره‌شده یک ساعت معتبر ۰ تا ۲۳ باشد).
+
+    >>> fixed, changed = fix_rtl_swapped_entries([ScheduleEntry(0, 8), ScheduleEntry(0, 0)])
+    >>> [e.hhmm for e in fixed], changed
+    (['08:00', '00:00'], True)
+    >>> fix_rtl_swapped_entries([ScheduleEntry(0, 30)])[0][0].hhmm   # «۳۰:۰۰» معنا ندارد
+    '00:30'
+    """
+    fixed: list[ScheduleEntry] = []
+    changed = False
+    for e in entries:
+        if e.minute <= 23 and e.hour != e.minute:
+            fixed.append(ScheduleEntry(hour=e.minute, minute=e.hour, price=e.price,
+                                       stock=e.stock, enabled=e.enabled))
+            changed = True
+        else:
+            fixed.append(e)
+    return fixed, changed
+
+
 def due_entry(
     now: _dt.datetime,
     entries: tuple[ScheduleEntry, ...] | list[ScheduleEntry],

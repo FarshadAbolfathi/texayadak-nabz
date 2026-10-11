@@ -117,7 +117,12 @@ class MainWindow(QMainWindow):
         self._allow_close = False
         self._build()
         self._setup_tray()
+        fixed_times = self._migrate_schedule_times()
         self._setup_scheduler()
+        if fixed_times:
+            from PySide6.QtCore import QTimer
+            self.schedule._load()      # تب پیش از اصلاح ساخته شده بود
+            QTimer.singleShot(1500, lambda: self._announce_schedule_fix(fixed_times))
 
     def _fit_to_screen(self) -> None:
         """اندازهٔ حالت «غیرتمام‌صفحه» داخل محدودهٔ قابل‌استفادهٔ صفحه؛ خود
@@ -381,6 +386,54 @@ class MainWindow(QMainWindow):
 
     #: هر چند میلی‌ثانیه زمان‌بند بررسی شود
     SCHEDULE_TICK_MS = 20_000
+
+    SCHEDULE_FIX_KEY = "schedule_rtl_fix_v1"
+
+    def _migrate_schedule_times(self) -> list[tuple[str, str]]:
+        """یک‌بار: ساعت‌هایی که با اشکال نمایشی کادر ساعت جابه‌جا ذخیره شده‌اند.
+
+        :returns: فهرست ``(قبل، بعد)`` برای ساعت‌هایی که اصلاح شدند.
+        """
+        from ..scheduler import fix_rtl_swapped_entries
+
+        if self.db.get_setting(self.SCHEDULE_FIX_KEY, False):
+            return []
+        self.db.set_setting(self.SCHEDULE_FIX_KEY, True)
+        has_saved = (self.db.get_setting("schedule_entries", None) is not None
+                     or self.db.get_setting("schedule_time", None) is not None)
+        if not has_saved:
+            return []
+        config = ScheduleConfig.from_settings(self.db.get_setting)
+        fixed, changed = fix_rtl_swapped_entries(config.entries)
+        if not changed:
+            return []
+        pairs = [(old.hhmm, new.hhmm) for old, new in zip(config.entries, fixed)
+                 if old.hhmm != new.hhmm]
+        fixed_cfg = ScheduleConfig(enabled=config.enabled, entries=fixed)
+        self.db.set_setting("schedule_entries", [e.to_dict() for e in fixed_cfg.entries])
+        if fixed_cfg.entries:
+            self.db.set_setting("schedule_time", fixed_cfg.entries[0].hhmm)
+        # نوبت‌های ثبت‌شدهٔ امروز با ساعت‌های غلط، مانع اجرای درست نشوند
+        self.db.set_setting("schedule_last_slot", None)
+        text = "، ".join(f"{a} → {b}" for a, b in pairs)
+        self.db.log("warn", f"زمان‌بندی: ساعت‌های جابه‌جا ذخیره‌شده اصلاح شد: {text}")
+        import logging
+        logging.getLogger("nabz.schedule").warning("اصلاح ساعت‌های جابه‌جا: %s", text)
+        return pairs
+
+    def _announce_schedule_fix(self, pairs: list[tuple[str, str]]) -> None:
+        from .. import jalali
+
+        lines = "\n".join(
+            f"   {jalali.fa_digits(a)}  ←  حالا درست: {jalali.fa_digits(b)}" for a, b in pairs)
+        QMessageBox.information(
+            self, "اصلاح ساعت‌های زمان‌بندی",
+            "در نسخه‌های قبل، کادر ساعت در تب «زمان‌بندی» ساعت و دقیقه را جابه‌جا "
+            "نشان می‌داد؛ مثلاً «۰۸:۰۰» دیده می‌شد ولی ۸ دقیقه بعد از نیمه‌شب "
+            "ذخیره می‌شد. برای همین اجراها همه نزدیک نیمه‌شب انجام می‌شدند.\n\n"
+            "ساعت‌ها خودکار به همان چیزی که دیده بودید اصلاح شد:\n"
+            f"{lines}\n\n"
+            "لطفاً یک بار تب «زمان‌بندی» را ببینید و اگر لازم بود تغییر دهید.")
 
     def _setup_scheduler(self) -> None:
         import logging
