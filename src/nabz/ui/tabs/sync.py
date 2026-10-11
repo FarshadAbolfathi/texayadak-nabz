@@ -327,7 +327,7 @@ class SyncTab(QWidget):
         # عرض همهٔ ستون‌ها با کشیدن لبهٔ سرستون قابل تغییر است و ذخیره می‌شود؛
         # ستون کد آن‌قدر پهن که کد ۱۰ یا ۱۲ رقمی کامل دیده شود.
         setup_columns(self.table, {
-            self.COL_SKU: 140, self.COL_NAME: 380, self.COL_CUR_PRICE: 130,
+            self.COL_SKU: 140, self.COL_NAME: 400, self.COL_CUR_PRICE: 130,
             self.COL_NEW_PRICE: 130, self.COL_CUR_STOCK: 110, self.COL_NEW_STOCK: 110,
             self.COL_STATUS: 230, self.COL_APPLY: 90,
         }, db=self.db, key="cols_sync_v2", stretch_last=False)
