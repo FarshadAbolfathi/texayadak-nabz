@@ -357,6 +357,23 @@ class Database:
                 (time.time(), level, message, run_id),
             )
 
+    def clear_history(self, *, keep_rollback: bool = True) -> tuple[int, int]:
+        """گزارش اجراها و رویدادها را پاک می‌کند.
+
+        :param keep_rollback: آخرین اجرای اعمال‌شده (و snapshot هایش) نگه
+            داشته می‌شود تا «بازگرداندن آخرین تغییر» همچنان کار کند.
+        :returns: ``(تعداد اجراهای پاک‌شده، تعداد رویدادهای پاک‌شده)``
+        """
+        keep = self.last_applied_run() if keep_rollback else None
+        with self._tx() as conn:
+            logs = conn.execute("DELETE FROM logs").rowcount
+            if keep is None:
+                runs = conn.execute("DELETE FROM runs").rowcount
+            else:
+                runs = conn.execute("DELETE FROM runs WHERE id <> ?", (keep,)).rowcount
+        # snapshot ها با ON DELETE CASCADE پاک می‌شوند
+        return max(runs, 0), max(logs, 0)
+
     def recent_logs(self, limit: int = 200) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM logs ORDER BY id DESC LIMIT ?", (limit,)

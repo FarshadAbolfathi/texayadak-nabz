@@ -87,9 +87,13 @@ class SupportTab(QWidget):
         save_btn.clicked.connect(self._save_log)
         open_btn = QPushButton("📂  باز کردن پوشهٔ لاگ")
         open_btn.clicked.connect(self._open_log_dir)
+        clear_btn = QPushButton("🗑  پاک کردن لاگ")
+        clear_btn.setObjectName("Danger")
+        clear_btn.clicked.connect(self._clear_log)
         btn_row.addWidget(save_btn)
         btn_row.addWidget(refresh_btn)
         btn_row.addWidget(open_btn)
+        btn_row.addWidget(clear_btn)
         log_card.body().addLayout(btn_row)
 
         self._log_view = QPlainTextEdit()
@@ -134,6 +138,26 @@ class SupportTab(QWidget):
                 )
             except OSError as exc:
                 QMessageBox.critical(self, "خطا", str(exc))
+
+    def _clear_log(self) -> None:
+        answer = QMessageBox.question(
+            self, "پاک کردن لاگ",
+            "فایل لاگ و گزارش کرش پاک شوند؟\n"
+            "از این به بعد فقط رویدادهای جدید ثبت می‌شوند و فایلی که برای "
+            "پشتیبانی می‌فرستید کوچک و تمیز می‌ماند.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        from ...logging_setup import clear_logs
+        freed = clear_logs()
+        self._show_log()
+        mb = freed / 1_000_000
+        size = f"{mb:.1f} مگابایت" if mb >= 0.1 else f"{freed // 1000} کیلوبایت"
+        QMessageBox.information(
+            self, "پاک شد",
+            f"لاگ پاک شد ({size}).".translate(str.maketrans("0123456789.", "۰۱۲۳۴۵۶۷۸۹٫")))
 
     def _open_log_dir(self) -> None:
         from ...logging_setup import log_dir

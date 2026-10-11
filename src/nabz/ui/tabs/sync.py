@@ -25,8 +25,11 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMessageBox,
+    QButtonGroup,
+    QLineEdit,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -35,7 +38,7 @@ from PySide6.QtWidgets import (
 
 from ...config import CredentialStore
 from ...db import Database
-from ...engine import SyncPlan, build_plan
+from ...engine import MatchStatus, SyncPlan, build_plan
 from ...runner import apply_plan, rollback_run
 from ...sources.haseb_dbf import load_products as load_haseb
 from ...sources.isaco_excel import load as load_isaco
@@ -45,6 +48,60 @@ from ..services import (
     woo_client_from_store,
 )
 from ..widgets import Card, make_copyable, muted, setup_columns
+
+
+#: دسته‌بندی ردیف‌های جدول سینک برای فیلتر و رنگ
+ROW_KINDS: list[tuple[str, str]] = [
+    ("all", "همه"),
+    ("change", "تغییر دارد"),
+    ("review", "بررسی شود"),
+    ("same", "بدون تغییر"),
+    ("no_isaco", "در ایساکو نیست"),
+    ("other", "سایر"),
+]
+
+_KIND_BG = {"change": "#e3f2fd", "review": "#fff8e1", "other": "#f5f5f5"}
+
+
+def row_kind(item, inc_price: bool = True) -> str:
+    """یک محصول سایت پس از مقایسه در کدام دسته است؟
+
+    - change: قیمت یا موجودی باید عوض شود
+    - review: تغییر بزرگ است و محافظ فعال شده (دستی تأیید شود)
+    - same: با ایساکو/حاسب یکی است؛ کاری لازم نیست
+    - no_isaco: کد در لیست ایساکو نیست (قیمتش سینک نمی‌شود)
+    - other: کد ندارد یا قیمت سایت خالی است
+    """
+    if item.needs_review:
+        return "review"
+    if item.changes:
+        return "change"
+    if item.match is MatchStatus.NO_SKU:
+        return "other"
+    if item.current_price is None and item.new_price:
+        return "other"           # قیمت سایت خالی است؛ خودکار پر نمی‌شود
+    if inc_price and item.match is MatchStatus.NO_ISACO_PRICE:
+        return "no_isaco"
+    return "same"
+
+
+def row_status_text(item, kind: str, inc_stock: bool = True) -> str:
+    if kind == "review":
+        return "⚠️ بررسی شود (تغییر قیمت زیاد)"
+    if kind == "change":
+        parts = [p for p, on in (("قیمت", item.price_changes),
+                                 ("موجودی", item.stock_changes)) if on]
+        return "🔄 تغییر " + " و ".join(parts)
+    if kind == "other":
+        if item.match is MatchStatus.NO_SKU:
+            return "کد (SKU) ندارد"
+        return "قیمت سایت خالی است"
+    if kind == "no_isaco":
+        return "در لیست ایساکو نیست"
+    text = "✓ بدون تغییر"
+    if inc_stock and item.match is MatchStatus.NO_HASEB_STOCK:
+        text += " (در حاسب نیست)"
+    return text
 
 
 class CompareWorker(QObject):
@@ -238,9 +295,30 @@ class SyncTab(QWidget):
         self.isaco_info.hide()
         layout.addWidget(self.isaco_info)
 
+        # فیلتر وضعیت: بعد از مقایسه همهٔ محصولات سایت در جدول هستند
+        filter_row = QHBoxLayout()
+        self.kind_group = QButtonGroup(self)
+        self.kind_buttons: dict[str, QRadioButton] = {}
+        for key, label in ROW_KINDS:
+            btn = QRadioButton(label)
+            btn.setProperty("kind", key)
+            self.kind_group.addButton(btn)
+            self.kind_buttons[key] = btn
+            filter_row.addWidget(btn)
+        self.kind_buttons["all"].setChecked(True)
+        self.kind_group.buttonToggled.connect(
+            lambda _b, on: on and self._apply_filter())
+        filter_row.addStretch(1)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("جستجو با نام یا کد ...")
+        self.search.setMaximumWidth(260)
+        self.search.textChanged.connect(lambda *_: self._apply_filter())
+        filter_row.addWidget(self.search)
+        layout.addLayout(filter_row)
+
         self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
         # فقط با دابل‌کلیک قابل ویرایش (تا اتفاقی تغییر نکند)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         # انتخاب خانه‌ای (نه ردیفی) تا بتوان فقط کد را انتخاب و کپی کرد
@@ -249,11 +327,15 @@ class SyncTab(QWidget):
         # عرض همهٔ ستون‌ها با کشیدن لبهٔ سرستون قابل تغییر است و ذخیره می‌شود؛
         # ستون کد آن‌قدر پهن که کد ۱۰ یا ۱۲ رقمی کامل دیده شود.
         setup_columns(self.table, {
-            self.COL_SKU: 160, self.COL_NAME: 440, self.COL_CUR_PRICE: 130,
-            self.COL_NEW_PRICE: 130, self.COL_CUR_STOCK: 100, self.COL_NEW_STOCK: 100,
-            self.COL_STATUS: 150, self.COL_APPLY: 90,
-        }, db=self.db, key="cols_sync", stretch_last=False)
+            self.COL_SKU: 140, self.COL_NAME: 380, self.COL_CUR_PRICE: 130,
+            self.COL_NEW_PRICE: 130, self.COL_CUR_STOCK: 110, self.COL_NEW_STOCK: 110,
+            self.COL_STATUS: 230, self.COL_APPLY: 90,
+        }, db=self.db, key="cols_sync_v2", stretch_last=False)
+        # قیمت جدید هم مثل قیمت فعلی با جداکنندهٔ هزارگان (مقدار خام عدد می‌ماند)
+        from .products import MoneyDelegate
+        self.table.setItemDelegateForColumn(self.COL_NEW_PRICE, MoneyDelegate(self.table))
         self.table.cellDoubleClicked.connect(self._on_double_click)
+        self.table.itemChanged.connect(self._on_item_edited)
         make_copyable(self.table, code_columns=(self.COL_SKU,),
                       on_copied=self.status.setText)
         layout.addWidget(self.table, 1)
@@ -266,6 +348,9 @@ class SyncTab(QWidget):
 
         self._manual_path: str | None = None
         self._row_items: list = []  # نگاشت شمارهٔ ردیف → SyncItem
+        self._row_kinds: list[str] = []
+        self._edited_rows: set[int] = set()
+        self._filling = False
 
     def _pick_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -330,23 +415,40 @@ class SyncTab(QWidget):
         self._inc_price, self._inc_stock = inc_price, inc_stock
         self._fill_table(plan)
         self._set_busy(False)
-        s = plan.summary()
+        counts = self._kind_counts()
+        total = len(self._row_items)
         self.status.setText(
-            f"مقایسه انجام شد — تغییرات: {self._fa(s['changes'])} | "
-            f"قیمت: {self._fa(s['price_changes'])} | موجودی: {self._fa(s['stock_changes'])} | "
-            f"نیازمند بررسی: {self._fa(s['needs_review'])}"
+            f"مقایسه انجام شد — {self._fa(total)} محصول سایت بررسی شد: "
+            f"{self._fa(counts['change'])} تغییر، "
+            f"{self._fa(counts['review'])} نیازمند بررسی، "
+            f"{self._fa(counts['same'])} بدون تغییر، "
+            f"{self._fa(counts['no_isaco'])} در ایساکو نیست، "
+            f"{self._fa(counts['other'])} سایر."
         )
-        self.apply_btn.setEnabled(s["changes"] > 0)
+        # اگر تغییری هست همان‌ها، وگرنه کل فهرست (تا معلوم باشد مقایسه انجام شده)
+        default = "change" if counts["change"] + counts["review"] else "all"
+        self.kind_buttons[default].setChecked(True)
+        self._apply_filter()
+        self.apply_btn.setEnabled(counts["change"] + counts["review"] > 0)
         if fresh:
             self.new_products_found.emit(fresh)
 
     def _fill_table(self, plan: SyncPlan) -> None:
-        rows = [i for i in plan.items if i.changes or i.needs_review]
-        self._row_items = rows
-        self.table.setRowCount(len(rows))
-        for r, item in enumerate(rows):
-            review = item.needs_review
-            # مقادیر خام (عدد) برای ستون‌های ویرایش‌پذیر، تا ذخیره ساده باشد
+        """همهٔ محصولات سایت؛ ردیف‌های تغییر/بررسی اول، بعد بقیه."""
+        order = {"review": 0, "change": 1, "other": 2, "no_isaco": 3, "same": 4}
+        inc_price = getattr(self, "_inc_price", True)
+        inc_stock = getattr(self, "_inc_stock", True)
+        pairs = [(row_kind(i, inc_price), i) for i in plan.items]
+        pairs.sort(key=lambda p: (order[p[0]], p[1].name))
+        self._row_items = [i for _, i in pairs]
+        self._row_kinds = [k for k, _ in pairs]
+        self._edited_rows = set()
+
+        self._filling = True
+        self.table.setUpdatesEnabled(False)
+        self.table.setRowCount(len(pairs))
+        code_font = self._code_font()
+        for r, (kind, item) in enumerate(pairs):
             new_price_raw = "" if item.new_price is None else str(item.new_price)
             new_stock_raw = "" if item.new_stock is None else str(item.new_stock)
             cells = {
@@ -356,28 +458,99 @@ class SyncTab(QWidget):
                 self.COL_NEW_PRICE: new_price_raw,
                 self.COL_CUR_STOCK: self._num(item.current_stock),
                 self.COL_NEW_STOCK: new_stock_raw,
-                self.COL_STATUS: "بررسی شود" if review else "آماده",
+                self.COL_STATUS: row_status_text(item, kind, inc_stock),
             }
+            bg = QBrush(QColor(_KIND_BG[kind])) if kind in _KIND_BG else None
             for c, text in cells.items():
                 cell = QTableWidgetItem(text)
                 if c != self.COL_NAME:
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == self.COL_SKU:
-                    cell.setFont(self._code_font())
+                    cell.setFont(code_font)
                     cell.setToolTip(f"{text}\nدابل‌کلیک: کپی کد")
-                if review:
-                    cell.setBackground(QBrush(QColor("#fff8e1")))
+                if c == self.COL_NAME:
+                    cell.setToolTip(text)
+                if bg is not None:
+                    cell.setBackground(bg)
+                if c == self.COL_STATUS:
+                    if kind == "same":
+                        cell.setForeground(QBrush(QColor("#2e7d32")))
+                    elif kind == "no_isaco":
+                        cell.setForeground(QBrush(QColor("#757575")))
                 # فقط قیمت/موجودی جدید قابل ویرایش‌اند
                 if c not in (self.COL_NEW_PRICE, self.COL_NEW_STOCK):
                     cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(r, c, cell)
 
-            # دکمهٔ اعمال تکی برای همین ردیف
-            btn = QPushButton("اعمال")
-            btn.setObjectName("Primary")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _=False, row=r: self._apply_single(row))
-            self.table.setCellWidget(r, self.COL_APPLY, btn)
+            # دکمهٔ اعمال تکی فقط برای ردیف‌هایی که کاری دارند
+            self.table.removeCellWidget(r, self.COL_APPLY)
+            if kind in ("change", "review"):
+                self._add_apply_button(r)
+        self.table.setUpdatesEnabled(True)
+        self._filling = False
+        self._update_kind_counts()
+
+    def _add_apply_button(self, r: int) -> None:
+        btn = QPushButton("اعمال")
+        btn.setObjectName("Primary")
+        btn.setStyleSheet("padding: 2px 10px; min-height: 0px; font-size: 12px;")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(lambda _=False, row=r: self._apply_single(row))
+        self.table.setCellWidget(r, self.COL_APPLY, btn)
+
+    def _kind_counts(self) -> dict[str, int]:
+        counts = {key: 0 for key, _ in ROW_KINDS}
+        for kind in self._row_kinds:
+            counts[kind] += 1
+        counts["all"] = len(self._row_kinds)
+        return counts
+
+    def _update_kind_counts(self) -> None:
+        counts = self._kind_counts()
+        for key, label in ROW_KINDS:
+            self.kind_buttons[key].setText(f"{label} ({self._fa(counts[key])})")
+
+    def current_kind(self) -> str:
+        btn = self.kind_group.checkedButton()
+        return btn.property("kind") if btn else "all"
+
+    def _apply_filter(self) -> None:
+        kind = self.current_kind()
+        text = self.search.text().strip()
+        for r, item in enumerate(self._row_items):
+            k = self._row_kinds[r]
+            if kind == "all":
+                ok = True
+            elif kind == "change":
+                ok = k in ("change", "review") or r in self._edited_rows
+            else:
+                ok = k == kind
+            if ok and text:
+                ok = text in item.sku or text in item.name
+            self.table.setRowHidden(r, not ok)
+
+    def _on_item_edited(self, cell: QTableWidgetItem) -> None:
+        """ویرایش دستی «قیمت جدید»/«موجودی جدید» هر ردیف (حتی بدون تغییر)."""
+        if self._filling or cell.column() not in (self.COL_NEW_PRICE, self.COL_NEW_STOCK):
+            return
+        r = cell.row()
+        if r >= len(self._row_items) or r in self._edited_rows:
+            return
+        self._edited_rows.add(r)
+        self._filling = True
+        status = self.table.item(r, self.COL_STATUS)
+        if status is not None:
+            status.setText("✏️ ویرایش دستی")
+            status.setForeground(QBrush(QColor("#1565c0")))
+        self._filling = False
+        if self.table.cellWidget(r, self.COL_APPLY) is None:
+            self._add_apply_button(r)
+        self.apply_btn.setEnabled(True)
+
+    def rows_to_apply(self) -> list[int]:
+        """ردیف‌هایی که «اعمال روی سایت» می‌فرستد (فیلتر جدول اثری ندارد)."""
+        return [r for r, k in enumerate(self._row_kinds)
+                if k in ("change", "review") or r in self._edited_rows]
 
     @staticmethod
     def _code_font() -> QFont:
@@ -447,8 +620,7 @@ class SyncTab(QWidget):
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        rows = list(range(self.table.rowCount()))
-        self._apply_rows(rows, mode="manual")
+        self._apply_rows(self.rows_to_apply(), mode="manual")
 
     def _apply_single(self, row: int) -> None:
         updates, snapshots = self._collect_rows([row])

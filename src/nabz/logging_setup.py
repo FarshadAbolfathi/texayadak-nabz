@@ -148,6 +148,59 @@ def get_logger(name: str = "nabz") -> logging.Logger:
     return logging.getLogger(f"nabz.{name}")
 
 
+def clear_logs() -> int:
+    """فایل لاگ (و نسخه‌های پشتیبانش) و crash.log را خالی می‌کند.
+
+    فایل‌های باز را حذف نمی‌کند (روی ویندوز ممکن نیست)؛ محتوایشان را صفر
+    می‌کند تا برنامه بی‌وقفه به نوشتن ادامه دهد.
+
+    :returns: تعداد بایت آزادشده
+    """
+    freed = 0
+    folder = log_dir()
+    logger = logging.getLogger("nabz")
+    open_streams = set()
+    for handler in logger.handlers:
+        if isinstance(handler, RotatingFileHandler) and handler.stream is not None:
+            handler.acquire()
+            try:
+                handler.flush()
+                handler.stream.seek(0, 2)
+                freed += handler.stream.tell()
+                handler.stream.seek(0)
+                handler.stream.truncate()
+                open_streams.add(Path(handler.baseFilename).resolve())
+            finally:
+                handler.release()
+    for path in folder.glob(f"{LOG_FILE_NAME}*"):
+        if path.resolve() in open_streams:
+            continue
+        try:
+            size = path.stat().st_size
+            if path.name == LOG_FILE_NAME:
+                path.write_bytes(b"")
+            else:
+                path.unlink()       # نسخه‌های چرخشی قدیمی (nabz.log.1 …)
+            freed += size
+        except OSError:
+            pass
+    crash = folder / CRASH_FILE_NAME
+    try:
+        if _crash_file is not None and not _crash_file.closed:
+            _crash_file.flush()
+            _crash_file.seek(0, 2)
+            freed += _crash_file.tell()
+            _crash_file.seek(0)
+            _crash_file.truncate()
+        elif crash.is_file():
+            freed += crash.stat().st_size
+            crash.write_bytes(b"")
+    except OSError:
+        pass
+    logger.info("لاگ‌ها پاک شد (%s بایت).", freed)
+    return freed
+
+
 def read_recent_log(max_bytes: int = 200_000) -> str:
     """آخرین بخش فایل لاگ را برمی‌گرداند (برای نمایش در برنامه)."""
     path = log_file()

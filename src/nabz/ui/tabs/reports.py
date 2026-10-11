@@ -7,8 +7,10 @@ import json
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -58,10 +60,16 @@ class ReportsTab(QWidget):
         header.setObjectName("H1")
         layout.addWidget(header)
 
+        buttons = QHBoxLayout()
         refresh = QPushButton("🔄  به‌روزرسانی")
         refresh.clicked.connect(self.refresh)
-        refresh.setMaximumWidth(160)
-        layout.addWidget(refresh)
+        buttons.addWidget(refresh)
+        self.clear_btn = QPushButton("🗑  پاک کردن گزارش‌ها و رویدادها")
+        self.clear_btn.setObjectName("Danger")
+        self.clear_btn.clicked.connect(self._clear)
+        buttons.addWidget(self.clear_btn)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
 
         self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
@@ -90,6 +98,23 @@ class ReportsTab(QWidget):
         self.logs.setWordWrap(True)
         make_copyable(self.logs)
         layout.addWidget(self.logs, 1)
+
+    def _clear(self) -> None:
+        answer = QMessageBox.question(
+            self, "پاک کردن گزارش‌ها",
+            "همهٔ گزارش اجراها و رویدادها پاک شوند؟\n\n"
+            "آخرین اجرای اعمال‌شده روی سایت نگه داشته می‌شود تا «بازگرداندن "
+            "آخرین تغییر» همچنان کار کند. این کار قابل برگشت نیست.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        runs, logs = self.db.clear_history(keep_rollback=True)
+        self.refresh()
+        QMessageBox.information(
+            self, "پاک شد",
+            f"{_fa(runs)} گزارش اجرا و {_fa(logs)} رویداد پاک شد.")
 
     def refresh(self) -> None:
         self._refresh_logs()
