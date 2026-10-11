@@ -32,7 +32,7 @@ jobs:
       - name: اجرای تست‌ها
         env:
           QT_QPA_PLATFORM: offscreen
-        run: pytest -q
+        run: python -X faulthandler -m pytest -p no:cacheprovider -rfEw --tb=short
 
       - name: نوشتن شمارهٔ build در برنامه
         shell: pwsh
