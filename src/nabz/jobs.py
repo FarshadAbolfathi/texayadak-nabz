@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -127,10 +128,8 @@ def try_auto_download_isaco(
     """لیست قیمت ایساکو را با مرورگر داخلی دانلود می‌کند (اگر ممکن بود).
 
     ⚠️ باید در **نخِ اصلیِ Qt** فراخوانی شود، چون از ``QWebEngineView``
-    استفاده می‌کند که فقط در نخ رابط کاربری قابل استفاده است. برای سینکِ
-    زمان‌بندی‌شده (که روی نخ APScheduler اجرا می‌شود)، فراخوانیِ این تابع
-    باید با یک سیگنال Qt به نخ اصلی منتقل شود؛ نمونه‌اش در
-    ``MainWindow._run_scheduled_sync`` است.
+    استفاده می‌کند که فقط در نخ رابط کاربری قابل استفاده است؛ نمونه‌اش در
+    ``MainWindow._run_scheduled_sync`` است. هم‌زمان فقط یک دانلود مجاز است.
 
     موفق یا ناموفق، هیچ استثنایی به بیرون درز نمی‌کند — اگر دانلود نشد،
     ``None`` برمی‌گرداند و ``run_auto_sync`` به فایل تنظیم‌شده برمی‌گردد.
@@ -138,6 +137,23 @@ def try_auto_download_isaco(
     creds = store.load_isaco()
     if not (creds.scus and creds.username and creds.password):
         return None
+    global _downloading
+    if _downloading:
+        # محافظ دوم (قفل اصلی sync_gate است): دو دانلود روی یک پروفایل
+        # مرورگر هم‌زمان هرگز نباید شروع شود
+        _log.warning("دانلود ایساکو در حال انجام است؛ درخواست دوم رد شد.")
+        return None
+    _downloading = True
+    try:
+        return _download_isaco(db, creds, on_progress)
+    finally:
+        _downloading = False
+
+
+_downloading = False
+
+
+def _download_isaco(db: Database, creds, on_progress) -> str | None:
     try:
         from .sources.isaco_browser import IsacoDownloader
     except ImportError as exc:
@@ -161,7 +177,17 @@ def try_auto_download_isaco(
         items = load_isaco(path)          # محافظ تعداد ردیف و قیمت داخل load است
         os.replace(path, final)
         db.set_setting("isaco_excel_path", str(final))
+        db.set_setting("isaco_downloaded_at", time.time())
         _log.info("دانلود خودکار ایساکو موفق: %s (%s قلم)", final, len(items))
+        try:
+            diff = record_isaco_diff(db, items, folder)
+            _log.info("لیست ایساکو نسبت به دانلود قبلی: %s قلم تغییر قیمت، %s جدید، %s حذف",
+                      diff["changed"], diff["added"], diff["removed"])
+            if not diff.get("first"):
+                db.log("info", f"لیست ایساکو دانلود شد ({len(items):,} قلم): "
+                               f"{diff['changed']:,} قلم تغییر قیمت نسبت به دانلود قبلی.")
+        except Exception:  # noqa: BLE001 - فقط گزارش است
+            _log.warning("مقایسهٔ لیست ایساکو با قبلی نشد", exc_info=True)
         return str(final)
     except Exception as exc:  # noqa: BLE001 - هرگز نباید سینک را متوقف کند
         _log.warning("دانلود خودکار ایساکو نشد (لیست قبلی حفظ شد): %s", exc,
@@ -171,6 +197,63 @@ def try_auto_download_isaco(
         except OSError:
             pass
         return None
+
+
+def _fingerprint(items: dict) -> dict[str, str]:
+    """اثر قیمت هر کالا (خرده/با ارزش افزوده/عمده) برای مقایسه با دانلود بعدی."""
+    return {code: f"{i.retail}|{i.vat}|{i.wholesale}" for code, i in items.items()}
+
+
+def record_isaco_diff(db: Database, items: dict, folder: Path | None = None) -> dict:
+    """لیست تازهٔ ایساکو را با دانلود قبلی مقایسه و نتیجه را ذخیره می‌کند.
+
+    تا بشود به کارفرما گفت «امروز ایساکو N قلم را تغییر قیمت داده» و اگر سینک
+    تغییری پیدا نکرد، معلوم باشد که چرا (مثلاً سینک خودکار قبلاً اعمال کرده).
+    """
+    import json
+
+    folder = folder or isaco_dir()
+    fp_file = folder / "isaco_prices.json"
+    new = _fingerprint(items)
+    old: dict[str, str] | None = None
+    if fp_file.is_file():
+        try:
+            old = json.loads(fp_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = None
+    if old is None:
+        diff = {"at": time.time(), "first": True, "changed": 0, "added": 0,
+                "removed": 0, "codes": []}
+    else:
+        changed = sorted(c for c, v in new.items() if c in old and old[c] != v)
+        diff = {
+            "at": time.time(),
+            "first": False,
+            "changed": len(changed),
+            "added": sum(1 for c in new if c not in old),
+            "removed": sum(1 for c in old if c not in new),
+            "codes": changed[:20000],
+        }
+        # تغییرهای قبلیِ همان روز گم نشوند: اگر دانلود دوم امروز است، تجمیع
+        prev = db.get_setting("isaco_diff", None) or {}
+        if prev and not prev.get("first") and _same_day(prev.get("at"), diff["at"]):
+            merged = sorted(set(prev.get("codes", [])) | set(changed))
+            diff["today_codes"] = merged[:20000]
+        else:
+            diff["today_codes"] = changed[:20000]
+    tmp = fp_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(new), encoding="utf-8")
+    os.replace(tmp, fp_file)
+    db.set_setting("isaco_diff", diff)
+    return diff
+
+
+def _same_day(a, b) -> bool:
+    import datetime as _dt
+    try:
+        return _dt.date.fromtimestamp(float(a)) == _dt.date.fromtimestamp(float(b))
+    except (TypeError, ValueError, OSError):
+        return False
 
 
 def isaco_dir() -> Path:
@@ -272,3 +355,41 @@ def run_auto_sync(
         missing_on_site=missing,
         newly_missing=fresh,
     )
+
+
+def isaco_freshness(db: Database, site_skus: set[str], pending_codes: set[str],
+                    *, downloaded_now: bool, now: float | None = None) -> tuple[str, bool]:
+    """یک خط توضیح دربارهٔ لیست ایساکوی استفاده‌شده در سینک.
+
+    :param site_skus: کدهای نرمال‌شدهٔ محصولات سایت
+    :param pending_codes: کدهایی که همین الان تغییر قیمتِ اعمال‌نشده دارند
+    :returns: ``(متن، هشدار است؟)`` — هشدار یعنی لیست تازه نیست.
+    """
+    import datetime as _dt
+
+    from .jalali import format_datetime
+
+    now = now or time.time()
+    at = db.get_setting("isaco_downloaded_at", None)
+    if not at:
+        return "لیست ایساکو: زمان دانلود نامعلوم (فایل دستی یا قدیمی).", True
+    when = format_datetime(_dt.datetime.fromtimestamp(float(at)))
+    stale = not downloaded_now
+    text = (f"لیست ایساکو: دانلود {when}." if not stale else
+            f"⚠️ دانلود لیست تازهٔ ایساکو این بار نشد؛ مقایسه با لیست قبلی "
+            f"(دانلود {when}) انجام شد.")
+    diff = db.get_setting("isaco_diff", None) or {}
+    if diff and not diff.get("first") and _same_day(diff.get("at"), now):
+        codes = set(diff.get("today_codes") or diff.get("codes") or [])
+        on_site = codes & site_skus
+        waiting = on_site & pending_codes
+        text += (f"  امروز ایساکو قیمت {len(codes):,} قلم را عوض کرده؛ "
+                 f"{len(on_site):,} قلم آن روی سایت شماست: "
+                 f"{len(waiting):,} قلم منتظر اعمال، "
+                 f"{len(on_site) - len(waiting):,} قلم قبلاً اعمال شده.")
+    elif diff.get("first"):
+        text += "  (اولین دانلود؛ از دانلود بعدی تغییرات روزانهٔ ایساکو هم گزارش می‌شود.)"
+    elif diff:
+        text += "  امروز هنوز تغییری نسبت به لیست دیروز ثبت نشده."
+    fa_digits = str.maketrans("0123456789,", "۰۱۲۳۴۵۶۷۸۹٬")
+    return text.translate(fa_digits), stale

@@ -30,6 +30,15 @@ def run(db_path: str | Path | None = None) -> int:
     from ..build_info import BUILD_NUMBER, COMMIT
     logger.info("نسخه build=%s commit=%s", BUILD_NUMBER, COMMIT)
 
+    # فقط یک نسخه از برنامه: اجرای دوباره، پنجرهٔ باز را جلو می‌آورد
+    from .single_instance import SingleInstance
+    instance = SingleInstance()
+    if not instance.acquire():
+        return 0
+    shown: list = []          # پنجرهٔ اصلی پس از ورود اینجا قرار می‌گیرد
+    instance.activated.connect(
+        lambda: shown and shown[0]._restore_from_tray())
+
     path = Path(db_path) if db_path else default_db_path()
     db = Database(path)
     store = CredentialStore()
@@ -44,13 +53,16 @@ def run(db_path: str | Path | None = None) -> int:
         login = LoginDialog(db)
         if login.exec() != QDialog.DialogCode.Accepted:
             db.close()
+            instance.release()
             return 0
 
     window = MainWindow(db, store)
+    shown.append(window)
     # همیشه تمام‌صفحه (و داخل محدودهٔ صفحه، بدون بیرون‌زدگی از لبه‌ها)
     window.showMaximized()
     code = app.exec()
     db.close()
+    instance.release()
     return code
 
 

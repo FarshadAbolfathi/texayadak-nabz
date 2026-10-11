@@ -232,6 +232,11 @@ class SyncTab(QWidget):
         layout.addWidget(self.progress)
         self.status = muted("")
         layout.addWidget(self.status)
+        # وضعیت لیست ایساکو: تازه است؟ امروز ایساکو چند قلم را عوض کرده؟
+        self.isaco_info = QLabel("")
+        self.isaco_info.setWordWrap(True)
+        self.isaco_info.hide()
+        layout.addWidget(self.isaco_info)
 
         self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
@@ -271,7 +276,9 @@ class SyncTab(QWidget):
             self.status.setText(f"فایل دستی انتخاب شد: {path}")
 
     def _fetch(self) -> None:
-        self._set_busy(True)
+        if not self._set_busy(True, "دریافت و مقایسه"):
+            return
+        self._downloaded_now = False
         # اگر فایل دستی نداریم، تلاش برای دانلود خودکار مرورگری (در نخ اصلی)
         if not self._manual_path:
             self._try_browser_download()
@@ -290,13 +297,35 @@ class SyncTab(QWidget):
         path = try_auto_download_isaco(
             self.db, self.store, on_progress=self.status.setText
         )
+        self._downloaded_now = bool(path)
         if not path:
             self.status.setText(
                 "دانلود خودکار نشد؛ از فایل تنظیم‌شده استفاده می‌شود (در صورت وجود)."
             )
 
+    def _show_isaco_info(self, plan) -> None:
+        from ...jobs import isaco_freshness
+
+        if self._manual_path:
+            text, stale = f"لیست ایساکو: فایل دستی ({Path(self._manual_path).name}).", False
+        else:
+            site = {i.sku for i in plan.items if i.sku}
+            pending = {i.sku for i in plan.items if i.price_changes}
+            text, stale = isaco_freshness(
+                self.db, site, pending,
+                downloaded_now=getattr(self, "_downloaded_now", False))
+        color = "#c62828" if stale else "#2e7d32"
+        self.isaco_info.setStyleSheet(f"color: {color}; font-weight: bold;")
+        self.isaco_info.setText(text)
+        self.isaco_info.show()
+
     def _on_compared(self, result) -> None:
         plan, inc_price, inc_stock, fresh = result
+        if inc_price:
+            try:
+                self._show_isaco_info(plan)
+            except Exception:  # noqa: BLE001 - فقط اطلاع‌رسانی است
+                _log.warning("نمایش وضعیت لیست ایساکو نشد", exc_info=True)
         self._plan = plan
         self._inc_price, self._inc_stock = inc_price, inc_stock
         self._fill_table(plan)
@@ -427,7 +456,7 @@ class SyncTab(QWidget):
             QMessageBox.information(self, "تغییری نیست",
                                     "این محصول تغییری برای اعمال ندارد.")
             return
-        self._apply_rows([row], mode="manual", silent=True)
+        self._apply_rows([row], mode="row", silent=True)
 
     def _apply_rows(self, row_indices: list[int], mode="manual",
                     silent: bool = False) -> None:
@@ -435,7 +464,8 @@ class SyncTab(QWidget):
         if not updates:
             QMessageBox.information(self, "تغییری نیست", "تغییری برای اعمال نیست.")
             return
-        self._set_busy(True)
+        if not self._set_busy(True, "اعمال تغییرات سینک"):
+            return
         worker = TableApplyWorker(self.db, self.store, updates, snapshots, mode)
         self._run_worker(worker, self._on_applied)
 
@@ -474,12 +504,29 @@ class SyncTab(QWidget):
         QMessageBox.critical(self, "خطا", message)
         self.status.setText(f"خطا: {message}")
 
-    def _set_busy(self, busy: bool) -> None:
+    def _set_busy(self, busy: bool, owner: str = "") -> bool:
+        """شروع/پایان کار؛ با قفل سراسری سینک (هم‌زمان با سینک خودکار نه).
+
+        :returns: ``False`` اگر کار دیگری در حال اجراست و نباید شروع کرد.
+        """
+        from ...sync_gate import gate
+
+        if busy:
+            if not gate.try_acquire(owner or "تب سینک"):
+                QMessageBox.information(
+                    self, "صبر کنید",
+                    f"«{gate.owner}» در حال اجراست. بعد از پایان آن دوباره امتحان کنید.")
+                return False
+            self._gate_owner = owner or "تب سینک"
+        else:
+            gate.release(getattr(self, "_gate_owner", None))
+            self._gate_owner = None
         self.progress.setVisible(busy)
         self.fetch_btn.setEnabled(not busy)
         self.pick_btn.setEnabled(not busy)
         if busy:
             self.apply_btn.setEnabled(False)
+        return True
 
     @staticmethod
     def _fa(n) -> str:

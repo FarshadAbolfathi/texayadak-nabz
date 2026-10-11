@@ -76,3 +76,12 @@ def make_cal(tmp_path):
         return write_dbf(tmp_path / name, CAL_FIELDS, rows, deleted=deleted)
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _reset_sync_gate():
+    """قفل سراسری سینک بین تست‌ها نشت نکند."""
+    from nabz.sync_gate import gate
+    gate.reset()
+    yield
+    gate.reset()

@@ -9,7 +9,8 @@
 
 منطق زمان‌بندی از اجرای واقعی جدا شده تا بدون شبکه و بدون صبر کردن
 تا نیمه‌شب قابل تست باشد: توابع خالص تصمیم می‌گیرند «الان باید اجرا
-شود یا نه»، و :class:`SyncScheduler` آن‌ها را با APScheduler به کار می‌بندد.
+شود یا نه»، و :class:`SyncScheduler` با تایمر پنجرهٔ اصلی (روی نخ اصلی Qt)
+آن‌ها را اجرا می‌کند؛ هر نوبت فقط یک بار.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ class ScheduleEntry:
 
     @property
     def key(self) -> str:
-        """شناسهٔ یکتای job در APScheduler."""
+        """شناسهٔ یکتای این ساعت."""
         return f"sync_{self.hour:02d}{self.minute:02d}"
 
     @classmethod
@@ -232,82 +233,115 @@ def _accepts_argument(func: Callable) -> bool:
 
 
 class SyncScheduler:
-    """اجرای خودکار روزانه را با APScheduler مدیریت می‌کند.
+    """تصمیم می‌گیرد کدام نوبت زمان‌بندی الان باید اجرا شود.
 
-    :param job: تابعی که سینک واقعی را انجام می‌دهد (تزریق می‌شود تا
-        این کلاس مستقل و تست‌پذیر بماند). اگر یک پارامتر بپذیرد،
-        :class:`ScheduleEntry` مربوط به همان اجرا به آن داده می‌شود.
-    :param last_run_getter: زمان آخرین اجرای موفق را می‌دهد (برای catch-up).
+    بدون نخ و بدون APScheduler: پنجرهٔ اصلی هر چند ثانیه :meth:`tick` را
+    (روی نخ اصلی Qt) صدا می‌زند. هر «نوبت» (تاریخ + ساعت) حداکثر یک بار
+    اجرا می‌شود و این در دیتابیس ثبت می‌شود؛ پس:
+
+    - اجرای تکراری/پشت‌سرهم یک نوبت ممکن نیست؛
+    - اگر سیستم خاموش/خواب بود یا سینک دیگری در حال اجرا بود، آخرین نوبتِ
+      گذشتهٔ امروز در اولین فرصت اجرا می‌شود (جبران)، نه از دست می‌رود؛
+    - اگر بعد از ساعت نوبت یک سینک موفق (مثلاً دستی) انجام شده، همان کافی
+      است و نوبت دوباره اجرا نمی‌شود.
+
+    :param job: سینک واقعی؛ اگر یک پارامتر بپذیرد، ``ScheduleEntry`` می‌گیرد.
+    :param last_run_getter: زمان پایان آخرین سینک موفق.
+    :param slot_getter/slot_setter: خواندن/نوشتن آخرین نوبت اجراشده
+        (رشتهٔ «YYYY-MM-DD HH:MM»)؛ پیش‌فرض فقط در حافظه.
+    :param is_busy: اگر ``True`` بدهد (سینک دیگری در جریان است) نوبت منتظر می‌ماند.
     """
 
     def __init__(
         self,
         job: Callable[..., None],
         last_run_getter: Callable[[], _dt.datetime | None],
+        *,
+        slot_getter: Callable[[], str | None] | None = None,
+        slot_setter: Callable[[str], None] | None = None,
+        is_busy: Callable[[], bool] | None = None,
+        log: Callable[[str], None] | None = None,
     ) -> None:
         self._job = job
         self._job_takes_entry = _accepts_argument(job)
         self._last_run_getter = last_run_getter
-        self._scheduler = None
+        self._memory_slot: str | None = None
+        self._slot_getter = slot_getter or (lambda: self._memory_slot)
+        self._slot_setter = slot_setter or self._remember_slot
+        self._is_busy = is_busy or (lambda: False)
+        self._log = log or (lambda _msg: None)
+        self._waiting_logged: str | None = None
         self._config = ScheduleConfig()
 
-    def _ensure_scheduler(self):
-        if self._scheduler is None:
-            from apscheduler.schedulers.background import BackgroundScheduler
-
-            self._scheduler = BackgroundScheduler(daemon=True)
-        return self._scheduler
+    def _remember_slot(self, slot: str) -> None:
+        self._memory_slot = slot
 
     @property
     def is_running(self) -> bool:
-        return self._scheduler is not None and self._scheduler.running
+        return self._config.enabled and bool(self._config.active_entries)
+
+    @property
+    def config(self) -> ScheduleConfig:
+        return self._config
 
     def apply_config(self, config: ScheduleConfig) -> None:
-        """زمان‌بندی را با تنظیمات جدید بازتنظیم می‌کند.
-
-        اگر غیرفعال شده، متوقف می‌شود. اگر فعال است، برای هر ساعت یک job
-        روزانه می‌گذارد و در صورت لزوم اجرای از دست رفته را جبران می‌کند.
-        """
+        """تنظیمات جدید را می‌گیرد و فوراً یک بار بررسی می‌کند (جبران)."""
         self._config = config
-        scheduler = self._ensure_scheduler()
+        self.tick()
 
-        # پاک کردن jobهای قبلی
-        scheduler.remove_all_jobs()
+    @staticmethod
+    def slot_id(day: _dt.date, entry: ScheduleEntry) -> str:
+        return f"{day.isoformat()} {entry.hhmm}"
 
-        if not config.enabled:
-            if scheduler.running:
-                scheduler.pause()
-            return
+    def due(self, now: _dt.datetime) -> tuple[ScheduleEntry, str] | None:
+        """نوبتی که الان باید اجرا شود (بدون اجرا کردنش)."""
+        if not self._config.enabled:
+            return None
+        passed = [
+            e for e in self._config.active_entries
+            if now >= now.replace(hour=e.hour, minute=e.minute, second=0, microsecond=0)
+        ]
+        if not passed:
+            return None
+        latest = max(passed, key=lambda e: (e.hour, e.minute))
+        slot = self.slot_id(now.date(), latest)
+        done = self._slot_getter()
+        if done and done >= slot:
+            return None
+        return latest, slot
 
-        from apscheduler.triggers.cron import CronTrigger
+    def tick(self, now: _dt.datetime | None = None) -> ScheduleEntry | None:
+        """اگر نوبتی رسیده و اجرا نشده، اجرایش می‌کند و برمی‌گرداند."""
+        now = now or _dt.datetime.now()
+        found = self.due(now)
+        if found is None:
+            return None
+        entry, slot = found
 
-        for entry in config.active_entries:
-            scheduler.add_job(
-                self._run_job,
-                CronTrigger(hour=entry.hour, minute=entry.minute),
-                args=[entry],
-                id=entry.key,
-                replace_existing=True,
-                misfire_grace_time=3600,
-                coalesce=True,
-            )
-        if not scheduler.running:
-            scheduler.start()
-        else:
-            scheduler.resume()
+        scheduled_at = now.replace(hour=entry.hour, minute=entry.minute,
+                                   second=0, microsecond=0)
+        last = self._last_run_getter()
+        if last is not None and last >= scheduled_at:
+            # بعد از ساعت نوبت یک سینک موفق انجام شده؛ همان کافی است
+            self._slot_setter(slot)
+            self._log(f"نوبت {entry.hhmm} لازم نشد؛ سینک موفق بعد از آن انجام شده بود.")
+            return None
 
-        self.catch_up_if_needed()
+        if self._is_busy():
+            if self._waiting_logged != slot:
+                self._waiting_logged = slot
+                self._log(f"نوبت {entry.hhmm} منتظر پایان سینک در حال اجراست.")
+            return None
+
+        self._slot_setter(slot)          # قبل از اجرا: هرگز دوباره اجرا نمی‌شود
+        late = int((now - scheduled_at).total_seconds() // 60)
+        self._log(f"اجرای نوبت {entry.hhmm}" + (f" (با {late} دقیقه تأخیر)" if late > 1 else ""))
+        self._run_job(entry)
+        return entry
 
     def catch_up_if_needed(self, now: _dt.datetime | None = None) -> bool:
-        """اگر اجرای امروز از دست رفته، همین حالا اجرا می‌کند."""
-        if not self._config.enabled:
-            return False
-        now = now or _dt.datetime.now()
-        entry = due_entry(now, self._config.entries, self._last_run_getter())
-        if entry is not None:
-            self._run_job(entry)
-            return True
-        return False
+        """سازگاری با نام قبلی: همان :meth:`tick`."""
+        return self.tick(now) is not None
 
     def _run_job(self, entry: ScheduleEntry | None = None) -> None:
         try:
@@ -315,10 +349,8 @@ class SyncScheduler:
                 self._job(entry)
             else:
                 self._job()
-        except Exception:  # noqa: BLE001 - نباید کل زمان‌بند را بخواباند
-            pass
+        except Exception as exc:  # noqa: BLE001 - نباید زمان‌بند را بخواباند
+            self._log(f"خطا در اجرای زمان‌بندی: {exc}")
 
     def shutdown(self) -> None:
-        if self._scheduler is not None and self._scheduler.running:
-            self._scheduler.shutdown(wait=False)
-        self._scheduler = None
+        """چیزی برای متوقف کردن نیست (تایمر مال پنجرهٔ اصلی است)."""

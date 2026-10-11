@@ -128,6 +128,10 @@ def _install_qt_message_handler(logger: logging.Logger) -> None:
 
     def handler(mode, context, message) -> None:
         level = levels.get(mode, logging.WARNING)
+        if getattr(context, "category", "") == "js" and level < logging.CRITICAL:
+            # پیام‌های کنسول جاوااسکریپتِ خود سایت ایساکو (هشدار moment،
+            # CORS چت‌بات و …) ربطی به برنامه ندارند و لاگ را پر می‌کردند
+            return
         if level >= logging.WARNING:
             qt_log.log(level, "%s", message)
         if mode == QtMsgType.QtFatalMsg:

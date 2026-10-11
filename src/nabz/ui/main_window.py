@@ -113,6 +113,7 @@ class MainWindow(QMainWindow):
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self._fit_to_screen()
         self._scheduler: SyncScheduler | None = None
+        self._sync_thread = self._sync_worker = None
         self._allow_close = False
         self._build()
         self._setup_tray()
@@ -378,12 +379,39 @@ class MainWindow(QMainWindow):
 
     # -- زمان‌بند -------------------------------------------------------
 
+    #: هر چند میلی‌ثانیه زمان‌بند بررسی شود
+    SCHEDULE_TICK_MS = 20_000
+
     def _setup_scheduler(self) -> None:
+        import logging
+
+        from PySide6.QtCore import QTimer
+
+        from ..sync_gate import gate
+
+        sched_log = logging.getLogger("nabz.schedule")
         self._scheduler = SyncScheduler(
             job=self._scheduled_job,
             last_run_getter=self._last_successful_run_time,
+            slot_getter=lambda: self.db.get_setting("schedule_last_slot", None),
+            slot_setter=lambda slot: self.db.set_setting("schedule_last_slot", slot),
+            is_busy=lambda: gate.busy,
+            log=lambda msg: (sched_log.info(msg), self.db.log("info", f"زمان‌بندی: {msg}")),
         )
+        # تایمر روی نخ اصلی؛ بعد از خواب/خاموشی سیستم هم در اولین تیک جبران می‌شود
+        self._schedule_timer = QTimer(self)
+        self._schedule_timer.setInterval(self.SCHEDULE_TICK_MS)
+        self._schedule_timer.timeout.connect(self._schedule_tick)
+        self._schedule_timer.start()
         self._apply_schedule()
+
+    def _schedule_tick(self) -> None:
+        if self._scheduler is not None:
+            try:
+                self._scheduler.tick()
+            except Exception:  # noqa: BLE001 - تایمر نباید بمیرد
+                import logging
+                logging.getLogger("nabz.schedule").exception("خطا در تیک زمان‌بند")
 
     def _apply_schedule(self) -> None:
         if self._scheduler is None:
@@ -396,17 +424,19 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"زمان‌بندی فعال: هر روز ساعت {fa_times}", 5000)
 
     def _last_successful_run_time(self) -> _dt.datetime | None:
-        for run in self.db.recent_runs(limit=20):
-            if run["status"] == "done" and run.get("finished_at"):
+        """پایان آخرین سینک خودکارِ موفق (اعمال تکی، ساخت محصول و … حساب نیست)."""
+        for run in self.db.recent_runs(limit=50):
+            if (run.get("mode") == "auto" and run["status"] == "done"
+                    and run.get("finished_at")):
                 return _dt.datetime.fromtimestamp(run["finished_at"])
         return None
 
     def _scheduled_job(self, entry=None) -> None:
-        """توسط زمان‌بند صدا زده می‌شود — ممکن است روی نخ APScheduler باشد.
+        """توسط زمان‌بند صدا زده می‌شود.
 
         هرگز مستقیم کار سنگین نمی‌کند؛ فقط سیگنال را صادر می‌کند تا با
-        QueuedConnection به نخ اصلی Qt منتقل شود (جایی که QWebEngineView
-        برای دانلود خودکار ایساکو مجاز است).
+        QueuedConnection (از هر نخی که باشد) روی نخ اصلی Qt و بیرون از
+        تیک تایمر اجرا شود — جایی که QWebEngineView مجاز است.
         """
         self.auto_sync_requested.emit(entry)
 
@@ -434,31 +464,42 @@ class MainWindow(QMainWindow):
         می‌سپارد تا رابط کاربری در طول آن (کوتاه) قفل نشود.
         """
         from ..jobs import try_auto_download_isaco
+        from ..sync_gate import gate
 
-        if getattr(self, "_sync_thread", None) is not None:
-            self.statusBar().showMessage("یک سینک خودکار در حال اجراست؛ این نوبت رد شد.", 5000)
+        # قفل از همین ابتدا (پیش از دانلود): دانلود حلقهٔ رویداد تودرتو دارد و
+        # بدون قفل، درخواست‌های دیگر وسط آن دانلود/سینک دوم را شروع می‌کردند.
+        owner = f"سینک {'خودکار' if mode == 'auto' else 'دستی'}"
+        if not gate.try_acquire(owner):
+            self.statusBar().showMessage(
+                f"«{gate.owner}» در حال اجراست؛ این درخواست اجرا نشد.", 6000)
             return
+        try:
+            if update_price is None:
+                update_price = bool(self.db.get_setting("schedule_price", True))
+            if update_price:
+                # دانلود لیست قیمت فقط وقتی لازم است که قیمت هم سینک شود
+                self.statusBar().showMessage("در حال دانلود لیست قیمت ایساکو ...")
+                try_auto_download_isaco(
+                    self.db, self.store, on_progress=self.statusBar().showMessage
+                )
 
-        if update_price is None:
-            update_price = bool(self.db.get_setting("schedule_price", True))
-        if update_price:
-            # دانلود لیست قیمت فقط وقتی لازم است که قیمت هم سینک شود
-            self.statusBar().showMessage("در حال دانلود لیست قیمت ایساکو ...")
-            try_auto_download_isaco(
-                self.db, self.store, on_progress=self.statusBar().showMessage
-            )
+            worker = AutoSyncWorker(self.db, self.store, mode=mode,
+                                    update_price=update_price, update_stock=update_stock)
+            from .workers import start_worker
+            self._sync_worker = worker
+            self._sync_thread = start_worker(
+                self, worker, on_done=self._on_auto_sync_done,
+                on_progress=self.statusBar().showMessage,
+                on_finished=lambda: self._clear_sync_thread(owner))
+        except Exception:
+            gate.release(owner)
+            raise
 
-        worker = AutoSyncWorker(self.db, self.store, mode=mode,
-                                update_price=update_price, update_stock=update_stock)
-        from .workers import start_worker
-        self._sync_worker = worker
-        self._sync_thread = start_worker(
-            self, worker, on_done=self._on_auto_sync_done,
-            on_progress=self.statusBar().showMessage,
-            on_finished=self._clear_sync_thread)
+    def _clear_sync_thread(self, owner: str | None = None) -> None:
+        from ..sync_gate import gate
 
-    def _clear_sync_thread(self) -> None:
         self._sync_thread = self._sync_worker = None
+        gate.release(owner)
 
     def _on_auto_sync_done(self, result) -> None:
         self.dashboard.refresh()

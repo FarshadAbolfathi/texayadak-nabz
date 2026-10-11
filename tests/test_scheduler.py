@@ -97,20 +97,19 @@ class TestSyncScheduler:
         # نباید استثنا پرتاب شود
         sched.catch_up_if_needed(now=dt.datetime(2026, 1, 2, 10, 0))
 
-    def test_real_scheduler_start_and_stop(self):
-        """اطمینان از اینکه APScheduler واقعی راه می‌افتد و می‌ایستد."""
+    def test_enabled_config_is_running(self):
         sched = SyncScheduler(job=lambda: None, last_run_getter=lambda: None)
-        sched.apply_config(ScheduleConfig(enabled=True, hour=3, minute=0))
+        sched.apply_config(ScheduleConfig(enabled=True, hour=23, minute=59))
         assert sched.is_running
         sched.shutdown()
-        assert not sched.is_running
 
     def test_disabled_config_does_not_run(self):
-        sched = SyncScheduler(job=lambda: None, last_run_getter=lambda: None)
+        calls = []
+        sched = SyncScheduler(job=lambda: calls.append(1), last_run_getter=lambda: None)
         sched.apply_config(ScheduleConfig(enabled=False))
-        # نباید job فعالی داشته باشد
-        assert not sched.is_running or len(sched._scheduler.get_jobs()) == 0
-        sched.shutdown()
+        assert not sched.is_running
+        assert sched.tick(dt.datetime(2026, 1, 2, 10, 0)) is None
+        assert calls == []
 
 
 class TestMultipleEntries:
@@ -159,15 +158,111 @@ class TestMultipleEntries:
         now = dt.datetime(2026, 1, 2, 13, 0)
         assert due_entry(now, entries, dt.datetime(2026, 1, 2, 3, 5)) is None
 
-    def test_real_scheduler_registers_one_job_per_entry(self):
+    def test_each_entry_has_unique_key(self):
         from nabz.scheduler import ScheduleEntry
-        sched = SyncScheduler(job=lambda: None,
-                              last_run_getter=lambda: dt.datetime.now())
-        sched.apply_config(ScheduleConfig(enabled=True, entries=[
-            ScheduleEntry(1, 0), ScheduleEntry(9, 30), ScheduleEntry(22, 0, enabled=False),
-        ]))
-        try:
-            assert sorted(j.id for j in sched._scheduler.get_jobs()) == \
-                ["sync_0100", "sync_0930"]
-        finally:
-            sched.shutdown()
+        assert ScheduleEntry(1, 0).key != ScheduleEntry(9, 30).key
+
+
+def entries_every_2h():
+    from nabz.scheduler import ScheduleEntry
+    return [ScheduleEntry(h, 0) for h in range(0, 24, 2)]
+
+
+def make(calls, store=None, busy=lambda: False, last=lambda: None):
+    store = store if store is not None else {}
+    sched = SyncScheduler(
+        job=lambda entry: calls.append(entry.hhmm),
+        last_run_getter=last,
+        slot_getter=lambda: store.get("slot"),
+        slot_setter=lambda v: store.__setitem__("slot", v),
+        is_busy=busy,
+    )
+    sched._config = ScheduleConfig(enabled=True, entries=entries_every_2h())
+    return sched, store
+
+
+class TestSlotScheduler:
+    """بازسازی مشکل کارفرما: زمان‌بندی هر ۲ ساعت، بعضی اجرا نمی‌شد و نیمه‌شب
+    ده‌ها اجرای پشت‌سرهم ثبت شد."""
+
+    def test_full_day_runs_every_slot_exactly_once(self):
+        calls = []
+        sched, _ = make(calls)
+        t = dt.datetime(2026, 1, 2, 0, 0, 0)
+        while t < dt.datetime(2026, 1, 3, 0, 0, 0):
+            sched.tick(t)                   # هر ۲۰ ثانیه، مثل تایمر پنجره
+            t += dt.timedelta(seconds=20)
+        assert calls == [f"{h:02d}:00" for h in range(0, 24, 2)]
+
+    def test_no_storm_when_ticked_repeatedly(self):
+        calls = []
+        sched, _ = make(calls)
+        for sec in range(0, 1800, 5):       # نیم ساعت تیک پشت‌سرهم بعد از نیمه‌شب
+            sched.tick(dt.datetime(2026, 1, 2, 0, 0) + dt.timedelta(seconds=sec))
+        assert calls == ["00:00"]
+
+    def test_slot_survives_restart(self):
+        calls = []
+        sched, store = make(calls)
+        sched.tick(dt.datetime(2026, 1, 2, 8, 0, 30))
+        again, _ = make(calls, store)        # برنامه دوباره باز شد
+        again.tick(dt.datetime(2026, 1, 2, 8, 5))
+        assert calls == ["08:00"]
+
+    def test_busy_slot_waits_then_runs_once(self):
+        calls = []
+        state = {"busy": True}
+        sched, _ = make(calls, busy=lambda: state["busy"])
+        for m in range(0, 10):
+            sched.tick(dt.datetime(2026, 1, 2, 10, m))
+        assert calls == []                  # منتظر ماند، از دست نرفت
+        state["busy"] = False
+        sched.tick(dt.datetime(2026, 1, 2, 10, 11))
+        sched.tick(dt.datetime(2026, 1, 2, 10, 12))
+        assert calls == ["10:00"]
+
+    def test_after_sleep_only_latest_missed_slot_runs(self):
+        calls = []
+        sched, store = make(calls)
+        store["slot"] = "2026-01-02 06:00"
+        sched.tick(dt.datetime(2026, 1, 2, 13, 30))   # سیستم ۶ تا ۱۳:۳۰ خواب بود
+        sched.tick(dt.datetime(2026, 1, 2, 13, 31))
+        assert calls == ["12:00"]
+
+    def test_next_day_runs_again(self):
+        calls = []
+        sched, _ = make(calls)
+        sched.tick(dt.datetime(2026, 1, 2, 22, 1))
+        sched.tick(dt.datetime(2026, 1, 3, 0, 0, 10))
+        assert calls == ["22:00", "00:00"]
+
+    def test_auto_run_after_slot_time_satisfies_slot(self):
+        calls = []
+        sched, store = make(calls, last=lambda: dt.datetime(2026, 1, 2, 8, 3))
+        sched.tick(dt.datetime(2026, 1, 2, 8, 10))
+        assert calls == [] and store["slot"] == "2026-01-02 08:00"
+
+    def test_failing_job_is_not_retried_in_a_loop(self):
+        calls = []
+
+        def boom(entry):
+            calls.append(entry.hhmm)
+            raise RuntimeError("شبکه")
+
+        store = {}
+        sched = SyncScheduler(job=boom, last_run_getter=lambda: None,
+                              slot_getter=lambda: store.get("slot"),
+                              slot_setter=lambda v: store.__setitem__("slot", v))
+        sched._config = ScheduleConfig(enabled=True, entries=entries_every_2h())
+        for sec in range(0, 600, 20):
+            sched.tick(dt.datetime(2026, 1, 2, 4, 0) + dt.timedelta(seconds=sec))
+        assert calls == ["04:00"]
+
+    def test_disabled_entry_is_skipped(self):
+        from nabz.scheduler import ScheduleEntry
+        calls = []
+        sched, _ = make(calls)
+        sched._config = ScheduleConfig(enabled=True, entries=[
+            ScheduleEntry(8, 0), ScheduleEntry(10, 0, enabled=False)])
+        sched.tick(dt.datetime(2026, 1, 2, 10, 30))
+        assert calls == ["08:00"]

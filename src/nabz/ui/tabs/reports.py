@@ -26,7 +26,7 @@ _STATUS_FA = {
     "failed": "ناموفق",
     "rolled_back": "بازگردانده شد",
 }
-_MODE_FA = {"auto": "سینک خودکار", "manual": "سینک دستی", "excel": "اکسل",
+_MODE_FA = {"auto": "سینک خودکار", "manual": "سینک دستی", "row": "اعمال تکی", "excel": "اکسل",
             "create": "ایجاد محصول", "edit": "ویرایش محصولات"}
 _LEVEL_FA = {"info": "اطلاع", "warn": "هشدار", "error": "خطا"}
 

@@ -181,7 +181,7 @@ class TestScheduleTestCrash:
                             lambda *a, **k: (gate.wait(5), AutoSyncResult(True, "ok"))[1])
         window.run_auto_sync_async(update_price=False)
         window.run_auto_sync_async(update_price=False)
-        assert "رد شد" in window.statusBar().currentMessage()
+        assert "اجرا نشد" in window.statusBar().currentMessage()
         gate.set()
         assert pump(lambda: window._sync_thread is None, 10)
 
