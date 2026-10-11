@@ -61,9 +61,37 @@ def run(db_path: str | Path | None = None) -> int:
     # همیشه تمام‌صفحه (و داخل محدودهٔ صفحه، بدون بیرون‌زدگی از لبه‌ها)
     window.showMaximized()
     code = app.exec()
+    _shutdown_cleanly(window)
     db.close()
     instance.release()
     return code
+
+
+def _shutdown_cleanly(window) -> None:
+    """پنجره، تایمرها و نخ‌ها را تا وقتی QApplication زنده است پاک می‌کند.
+
+    اگر این‌ها به پاک‌سازی پایانی پایتون سپرده شوند، روی ویندوز ممکن است
+    بعد از خود QApplication پاک شوند و موقع خروج کرش بدهند.
+    """
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    try:
+        timer = getattr(window, "_schedule_timer", None)
+        if timer is not None:
+            timer.stop()
+        thread = getattr(window, "_sync_thread", None)
+        if thread is not None:
+            thread.quit()
+            thread.wait(10_000)
+        tray = getattr(window, "tray", None)
+        if tray is not None:
+            tray.hide()
+        window.hide()
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        QCoreApplication.processEvents()
+    except Exception:  # noqa: BLE001 - خروج نباید گیر کند
+        pass
 
 
 def _seed_defaults(db, store) -> None:
@@ -99,7 +127,20 @@ def _seed_defaults(db, store) -> None:
 
 
 def main() -> None:
-    sys.exit(run())
+    import logging
+    import os
+
+    code = run()
+    # همه‌چیز (دیتابیس، لاگ، پنجره) بسته شده؛ از پاک‌سازی پایانی و بی‌ترتیبِ
+    # اشیای Qt توسط پایتون صرف‌نظر می‌کنیم که روی ویندوز می‌تواند هنگام خروج
+    # کرش بدهد و crash.log را با خطای گمراه‌کننده پر کند.
+    logging.shutdown()
+    try:
+        sys.stdout and sys.stdout.flush()
+        sys.stderr and sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    os._exit(code)
 
 
 if __name__ == "__main__":

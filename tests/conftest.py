@@ -85,3 +85,33 @@ def _reset_sync_gate():
     gate.reset()
     yield
     gate.reset()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _qt_orderly_teardown():
+    """در پایان نشست، پنجره‌ها/تایمرها قبل از QApplication پاک شوند.
+
+    بدون این، پایتون موقع خروج اشیای Qt را با ترتیب دلخواه پاک می‌کند و روی
+    ویندوز (CI) بعد از پاس شدن همهٔ تست‌ها «Fatal Python error: Aborted» می‌دهد.
+    """
+    yield
+    try:
+        from PySide6.QtCore import QCoreApplication, QEvent, QTimer
+        from PySide6.QtWidgets import QApplication
+    except ImportError:
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in app.topLevelWidgets():
+        for timer in widget.findChildren(QTimer):
+            timer.stop()
+        tray = getattr(widget, "tray", None)
+        if tray is not None:
+            tray.hide()
+        widget.close()
+        widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+    import gc
+    gc.collect()
