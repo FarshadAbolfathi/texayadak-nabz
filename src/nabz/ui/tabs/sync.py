@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QButtonGroup,
+    QCheckBox,
     QLineEdit,
     QProgressBar,
     QPushButton,
@@ -79,7 +80,7 @@ def row_kind(item, inc_price: bool = True) -> str:
     if item.match is MatchStatus.NO_SKU:
         return "other"
     if item.current_price is None and item.new_price:
-        return "other"           # قیمت سایت خالی است؛ خودکار پر نمی‌شود
+        return "other"           # محصول متغیر: قیمت روی حالت‌هاست
     if inc_price and item.match is MatchStatus.NO_ISACO_PRICE:
         return "no_isaco"
     return "same"
@@ -89,18 +90,25 @@ def row_status_text(item, kind: str, inc_stock: bool = True) -> str:
     if kind == "review":
         return "⚠️ بررسی شود (تغییر قیمت زیاد)"
     if kind == "change":
+        link = f" — 🔗 {item.mapped_code}" if item.mapped_code else ""
+        if item.fills_empty_price:
+            return "💲 قیمت‌گذاری (روی سایت قیمت نداشت)" + (
+                " + موجودی" if item.stock_changes else "") + link
         parts = [p for p, on in (("قیمت", item.price_changes),
-                                 ("موجودی", item.stock_changes)) if on]
-        return "🔄 تغییر " + " و ".join(parts)
+                                 ("موجودی", item.stock_changes),
+                                 ("نام", item.name_changes)) if on]
+        return "🔄 تغییر " + " و ".join(parts) + link
     if kind == "other":
         if item.match is MatchStatus.NO_SKU:
             return "کد (SKU) ندارد"
-        return "قیمت سایت خالی است"
+        return "محصول متغیر (قیمت روی حالت‌هاست)"
     if kind == "no_isaco":
-        return "در لیست ایساکو نیست"
+        return "در لیست ایساکو نیست — «تطبیق» را بزنید"
     text = "✓ بدون تغییر"
     if inc_stock and item.match is MatchStatus.NO_HASEB_STOCK:
         text += " (در حاسب نیست)"
+    if item.mapped_code:
+        text += f" — 🔗 کد ایساکو {item.mapped_code}"
     return text
 
 
@@ -145,6 +153,8 @@ class CompareWorker(QObject):
                 stock_rules=stock_rules_from_db(self.db),
                 update_price=bool(isaco),
                 update_stock=bool(haseb),
+                code_map=self.db.get_code_map(),
+                compare_names=bool(self.db.get_setting("sync_compare_names", False)),
             )
             fresh = 0
             if haseb:
@@ -153,7 +163,7 @@ class CompareWorker(QObject):
                     _, fresh = record_missing_products(self.db, haseb, products, woo)
                 except Exception:  # noqa: BLE001 - فقط اطلاع‌رسانی است
                     _log.warning("بررسی محصولات جدید حاسب نشد", exc_info=True)
-            self.done.emit((plan, bool(isaco), bool(haseb), fresh))
+            self.done.emit((plan, bool(isaco), bool(haseb), fresh, isaco))
         except Exception as exc:  # noqa: BLE001
             _log.exception("خطا در مقایسهٔ سینک")
             self.failed.emit(str(exc))
@@ -230,11 +240,13 @@ class SyncTab(QWidget):
     #: تعداد کالاهای تازه‌کشف‌شدهٔ حاسب که روی سایت نیستند
     new_products_found = Signal(int)
 
-    HEADERS = ["کد (SKU)", "نام محصول", "قیمت فعلی", "قیمت جدید",
+    HEADERS = ["کد (SKU)", "نام محصول", "نام جدید (حاسب)", "قیمت فعلی", "قیمت جدید",
                "موجودی فعلی", "موجودی جدید", "وضعیت", "اعمال"]
     # ستون‌های قابل‌ویرایش: قیمت جدید و موجودی جدید
-    COL_SKU, COL_NAME, COL_CUR_PRICE, COL_NEW_PRICE = 0, 1, 2, 3
-    COL_CUR_STOCK, COL_NEW_STOCK, COL_STATUS, COL_APPLY = 4, 5, 6, 7
+    COL_SKU, COL_NAME, COL_NEW_NAME, COL_CUR_PRICE, COL_NEW_PRICE = 0, 1, 2, 3, 4
+    COL_CUR_STOCK, COL_NEW_STOCK, COL_STATUS, COL_APPLY = 5, 6, 7, 8
+    #: ستون‌هایی که کاربر می‌تواند ویرایش کند
+    EDITABLE = (COL_NEW_NAME, COL_NEW_PRICE, COL_NEW_STOCK)
 
     def __init__(self, db: Database, store: CredentialStore, parent=None):
         super().__init__(parent)
@@ -261,7 +273,7 @@ class SyncTab(QWidget):
         self.fetch_btn = QPushButton("🔄  دریافت و مقایسه")
         self.fetch_btn.setObjectName("Primary")
         self.fetch_btn.setMinimumHeight(44)
-        self.fetch_btn.clicked.connect(self._fetch)
+        self.fetch_btn.clicked.connect(lambda: self._fetch(download=True))
         row.addWidget(self.fetch_btn, 2)
 
         self.pick_btn = QPushButton("📂  فایل ایساکو دستی")
@@ -276,6 +288,14 @@ class SyncTab(QWidget):
         row.addWidget(self.apply_btn, 2)
 
         toolbar.body().addLayout(row)
+        self.names_check = QCheckBox("مقایسهٔ نام محصولات با حاسب")
+        self.names_check.setToolTip(
+            "روشن: نام‌هایی که در حاسب اصلاح شده‌اند با نام سایت مقایسه و در ستون "
+            "«نام جدید (حاسب)» پیشنهاد می‌شوند (با «اعمال» فقط عنوان عوض می‌شود، "
+            "نامک/آدرس صفحه نه). سینک خودکار هرگز نام را تغییر نمی‌دهد.")
+        self.names_check.setChecked(bool(self.db.get_setting("sync_compare_names", False)))
+        self.names_check.toggled.connect(self._on_names_toggled)
+        toolbar.add(self.names_check)
         self._info = muted(
             "«دریافت و مقایسه» خودکار قیمت را از ایساکو و موجودی را از حاسب می‌گیرد. "
             "اگر دانلود خودکار میسر نشد، از فایل ایساکوی دستی/تنظیم‌شده استفاده می‌شود."
@@ -309,6 +329,12 @@ class SyncTab(QWidget):
         self.kind_group.buttonToggled.connect(
             lambda _b, on: on and self._apply_filter())
         filter_row.addStretch(1)
+        self.match_btn = QPushButton("🔗  پیشنهاد تطبیق کدها")
+        self.match_btn.setToolTip(
+            "برای محصولاتی که کدشان در ایساکو نیست (مثلاً ایساکو دو رقم آخر را "
+            "حذف کرده) کالای متناظر را پیشنهاد می‌دهد تا تأیید کنید.")
+        self.match_btn.clicked.connect(self._match_bulk)
+        filter_row.addWidget(self.match_btn)
         self.search = QLineEdit()
         self.search.setPlaceholderText("جستجو با نام یا کد ...")
         self.search.setMaximumWidth(260)
@@ -327,10 +353,12 @@ class SyncTab(QWidget):
         # عرض همهٔ ستون‌ها با کشیدن لبهٔ سرستون قابل تغییر است و ذخیره می‌شود؛
         # ستون کد آن‌قدر پهن که کد ۱۰ یا ۱۲ رقمی کامل دیده شود.
         setup_columns(self.table, {
-            self.COL_SKU: 140, self.COL_NAME: 400, self.COL_CUR_PRICE: 130,
+            self.COL_SKU: 125, self.COL_NAME: 400, self.COL_NEW_NAME: 300,
+            self.COL_CUR_PRICE: 130,
             self.COL_NEW_PRICE: 130, self.COL_CUR_STOCK: 110, self.COL_NEW_STOCK: 110,
             self.COL_STATUS: 230, self.COL_APPLY: 90,
-        }, db=self.db, key="cols_sync_v2", stretch_last=False)
+        }, db=self.db, key="cols_sync_v3", stretch_last=False)
+        self.table.setColumnHidden(self.COL_NEW_NAME, not self.names_check.isChecked())
         # قیمت جدید هم مثل قیمت فعلی با جداکنندهٔ هزارگان (مقدار خام عدد می‌ماند)
         from .products import MoneyDelegate
         self.table.setItemDelegateForColumn(self.COL_NEW_PRICE, MoneyDelegate(self.table))
@@ -360,12 +388,12 @@ class SyncTab(QWidget):
             self._manual_path = path
             self.status.setText(f"فایل دستی انتخاب شد: {path}")
 
-    def _fetch(self) -> None:
+    def _fetch(self, download: bool = True) -> None:
         if not self._set_busy(True, "دریافت و مقایسه"):
             return
         self._downloaded_now = False
         # اگر فایل دستی نداریم، تلاش برای دانلود خودکار مرورگری (در نخ اصلی)
-        if not self._manual_path:
+        if download and not self._manual_path:
             self._try_browser_download()
         worker = CompareWorker(self.db, self.store, self._manual_path)
         self._run_worker(worker, self._on_compared)
@@ -388,6 +416,12 @@ class SyncTab(QWidget):
                 "دانلود خودکار نشد؛ از فایل تنظیم‌شده استفاده می‌شود (در صورت وجود)."
             )
 
+    def _on_names_toggled(self, on: bool) -> None:
+        self.db.set_setting("sync_compare_names", on)
+        self.table.setColumnHidden(self.COL_NEW_NAME, not on)
+        if self._row_items:
+            self.status.setText("برای اعمال این تغییر، دوباره «دریافت و مقایسه» را بزنید.")
+
     def _show_isaco_info(self, plan) -> None:
         from ...jobs import isaco_freshness
 
@@ -405,7 +439,8 @@ class SyncTab(QWidget):
         self.isaco_info.show()
 
     def _on_compared(self, result) -> None:
-        plan, inc_price, inc_stock, fresh = result
+        plan, inc_price, inc_stock, fresh, *rest = result
+        self._isaco = rest[0] if rest else {}
         if inc_price:
             try:
                 self._show_isaco_info(plan)
@@ -454,6 +489,7 @@ class SyncTab(QWidget):
             cells = {
                 self.COL_SKU: item.sku,
                 self.COL_NAME: item.name,
+                self.COL_NEW_NAME: item.new_name or "",
                 self.COL_CUR_PRICE: self._money(item.current_price),
                 self.COL_NEW_PRICE: new_price_raw,
                 self.COL_CUR_STOCK: self._num(item.current_stock),
@@ -478,7 +514,13 @@ class SyncTab(QWidget):
                     elif kind == "no_isaco":
                         cell.setForeground(QBrush(QColor("#757575")))
                 # فقط قیمت/موجودی جدید قابل ویرایش‌اند
-                if c not in (self.COL_NEW_PRICE, self.COL_NEW_STOCK):
+                if c == self.COL_NEW_NAME:
+                    cell.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    if item.name_changes:
+                        cell.setForeground(QBrush(QColor("#1565c0")))
+                        cell.setToolTip(f"فعلی: {item.name}\nحاسب: {item.new_name}")
+                if c not in self.EDITABLE:
                     cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(r, c, cell)
 
@@ -486,6 +528,8 @@ class SyncTab(QWidget):
             self.table.removeCellWidget(r, self.COL_APPLY)
             if kind in ("change", "review"):
                 self._add_apply_button(r)
+            elif kind == "no_isaco" and item.sku:
+                self._add_match_button(r)
         self.table.setUpdatesEnabled(True)
         self._filling = False
         self._update_kind_counts()
@@ -497,6 +541,65 @@ class SyncTab(QWidget):
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(lambda _=False, row=r: self._apply_single(row))
         self.table.setCellWidget(r, self.COL_APPLY, btn)
+
+    def _add_match_button(self, r: int) -> None:
+        btn = QPushButton("🔗 تطبیق")
+        btn.setStyleSheet("padding: 2px 8px; min-height: 0px; font-size: 12px;")
+        btn.setToolTip("پیدا کردن همین کالا در لیست ایساکو (اگر ایساکو کد را کوتاه کرده)")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(lambda _=False, row=r: self._match_single(row))
+        self.table.setCellWidget(r, self.COL_APPLY, btn)
+
+    # -- تطبیق کد با ایساکو ------------------------------------------------
+
+    def _match_single(self, row: int) -> None:
+        from ...codematch import suggest
+        from ..code_match_dialog import CodeMatchDialog
+
+        item = self._row_items[row]
+        candidates = suggest(item.sku, getattr(self, "_isaco", {}) or {})
+        dlg = CodeMatchDialog([(item, candidates)], self._price_rules(), parent=self)
+        if dlg.exec() and dlg.chosen:
+            self._save_matches(dlg.chosen)
+
+    def _match_bulk(self) -> None:
+        from ...codematch import build_family_index, suggest
+        from ..code_match_dialog import CodeMatchDialog
+
+        isaco = getattr(self, "_isaco", {}) or {}
+        if not isaco:
+            QMessageBox.information(self, "تطبیق کد", "اول «دریافت و مقایسه» را بزنید.")
+            return
+        index = build_family_index(isaco)
+        rows = [(item, suggest(item.sku, isaco, index))
+                for item, kind in zip(self._row_items, self._row_kinds)
+                if kind == "no_isaco" and item.sku]
+        rows = [(i, c) for i, c in rows if c]
+        if not rows:
+            QMessageBox.information(
+                self, "تطبیق کد",
+                "برای محصولاتی که در ایساکو نیستند پیشنهادی پیدا نشد.")
+            return
+        dlg = CodeMatchDialog(rows, self._price_rules(), parent=self)
+        if dlg.exec() and dlg.chosen:
+            self._save_matches(dlg.chosen)
+
+    def _price_rules(self):
+        return price_rules_from_db(self.db)
+
+    def _save_matches(self, chosen: dict[str, str]) -> None:
+        for site_sku, isaco_code in chosen.items():
+            self.db.set_code_map(site_sku, isaco_code, note="تأیید دستی در تب سینک")
+        self.db.log("info", "تطبیق کد ایساکو: " + "، ".join(
+            f"{a} → {b}" for a, b in list(chosen.items())[:30]))
+        answer = QMessageBox.question(
+            self, "تطبیق ذخیره شد",
+            f"{self._fa(len(chosen))} تطبیق ذخیره شد و از این به بعد در سینک دستی و "
+            "خودکار استفاده می‌شود.\n\nهمین الان دوباره مقایسه شود (بدون دانلود "
+            "دوبارهٔ لیست ایساکو)؟",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._fetch(download=False)
 
     def _kind_counts(self) -> dict[str, int]:
         counts = {key: 0 for key, _ in ROW_KINDS}
@@ -531,7 +634,7 @@ class SyncTab(QWidget):
 
     def _on_item_edited(self, cell: QTableWidgetItem) -> None:
         """ویرایش دستی «قیمت جدید»/«موجودی جدید» هر ردیف (حتی بدون تغییر)."""
-        if self._filling or cell.column() not in (self.COL_NEW_PRICE, self.COL_NEW_STOCK):
+        if self._filling or cell.column() not in self.EDITABLE:
             return
         r = cell.row()
         if r >= len(self._row_items) or r in self._edited_rows:
@@ -594,6 +697,7 @@ class SyncTab(QWidget):
             if new_price and new_price != old_price:
                 payload["regular_price"] = new_price
                 snap.new_price = new_price
+                snap.old_price = old_price      # "" = خالی بود؛ بازگرداندن خالی‌اش می‌کند
 
             old_stock_s = "" if old_stock is None else str(old_stock)
             if new_stock != old_stock_s and new_stock != "":
@@ -606,6 +710,12 @@ class SyncTab(QWidget):
                     snap.new_status = payload["stock_status"]
                 except ValueError:
                     pass
+
+            if not self.table.isColumnHidden(self.COL_NEW_NAME):
+                new_name = self.table.item(r, self.COL_NEW_NAME).text().strip()
+                if new_name and new_name != item.name:
+                    payload["name"] = new_name
+                    snap.old_name, snap.new_name = item.name, new_name
 
             if len(payload) > 1:
                 updates.append(payload)

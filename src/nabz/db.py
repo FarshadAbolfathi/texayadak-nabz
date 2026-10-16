@@ -190,6 +190,11 @@ class Database:
                 "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+            # افزودنی‌های بعدی به جدول‌ها (برای دیتابیس‌های قدیمی هم امن و تکرارپذیر)
+            existing = {r["name"] for r in conn.execute("PRAGMA table_info(snapshots)")}
+            for column in ("old_name", "new_name"):       # بازگرداندن نام محصول
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE snapshots ADD COLUMN {column} TEXT")
 
     # -- تنظیمات -------------------------------------------------------
 
@@ -266,12 +271,13 @@ class Database:
         with self._tx() as conn:
             conn.execute(
                 "INSERT INTO snapshots(run_id, product_id, sku, old_price, "
-                "new_price, old_stock, new_stock, old_status, new_status, applied) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "new_price, old_stock, new_stock, old_status, new_status, applied, "
+                "old_name, new_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id, snap.product_id, snap.sku, snap.old_price,
                     snap.new_price, snap.old_stock, snap.new_stock,
                     snap.old_status, snap.new_status, int(snap.applied),
+                    snap.old_name, snap.new_name,
                 ),
             )
 
@@ -279,13 +285,13 @@ class Database:
         with self._tx() as conn:
             conn.executemany(
                 "INSERT INTO snapshots(run_id, product_id, sku, old_price, "
-                "new_price, old_stock, new_stock, old_status, new_status, applied) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "new_price, old_stock, new_stock, old_status, new_status, applied, "
+                "old_name, new_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         run_id, s.product_id, s.sku, s.old_price, s.new_price,
                         s.old_stock, s.new_stock, s.old_status, s.new_status,
-                        int(s.applied),
+                        int(s.applied), s.old_name, s.new_name,
                     )
                     for s in snaps
                 ],
@@ -394,6 +400,8 @@ class Snapshot:
     old_status: str | None = None
     new_status: str | None = None
     applied: bool = False
+    old_name: str | None = None
+    new_name: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Snapshot":
@@ -407,6 +415,8 @@ class Snapshot:
             old_status=row["old_status"],
             new_status=row["new_status"],
             applied=bool(row["applied"]),
+            old_name=row["old_name"] if "old_name" in row.keys() else None,
+            new_name=row["new_name"] if "new_name" in row.keys() else None,
         )
 
     def to_woo_revert(self) -> dict:
@@ -419,4 +429,6 @@ class Snapshot:
             payload["stock_quantity"] = self.old_stock
         if self.old_status is not None:
             payload["stock_status"] = self.old_status
+        if self.old_name is not None and self.new_name is not None:
+            payload["name"] = self.old_name
         return payload

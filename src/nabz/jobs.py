@@ -328,6 +328,7 @@ def run_auto_sync(
         stock_rules=_stock_rules(db),
         update_price=bool(isaco),
         update_stock=bool(haseb),
+        code_map=db.get_code_map(),
     )
 
     result = apply_plan(

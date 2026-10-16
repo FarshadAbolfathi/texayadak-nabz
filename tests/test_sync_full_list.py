@@ -53,10 +53,10 @@ def isaco(code, vat):
     return IsacoItem(code, "x", "", "عدد", 1, retail=vat, vat=vat, wholesale=vat)
 
 
-def woo(pid, sku, price):
+def woo(pid, sku, price, kind="simple"):
     return WooProduct(id=pid, name=f"محصول {pid}", sku=sku, regular_price=price,
                       stock_quantity=1, stock_status="instock", manage_stock=True,
-                      type="simple", status="publish")
+                      type=kind, status="publish")
 
 
 def site_price(vat) -> str:
@@ -70,14 +70,16 @@ def make_plan():
         "0000000002": isaco("0000000002", 20_000_000),   # بدون تغییر
         "0000000005": isaco("0000000005", 30_000_000),   # قیمت سایت خالی
         "0000000006": isaco("0000000006", 90_000_000),   # تغییر خیلی بزرگ → بررسی
+        "0000000007": isaco("0000000007", 40_000_000),   # محصول متغیر بی‌قیمت
     }
     products = [
         woo(1, "0000000001", "900000"),
         woo(2, "0000000002", site_price(20_000_000)),
         woo(3, "0000000003", "500000"),                  # در ایساکو نیست
         woo(4, "", "700000"),                            # کد ندارد
-        woo(5, "0000000005", ""),
+        woo(5, "0000000005", ""),                        # ساده و بی‌قیمت → قیمت‌گذاری
         woo(6, "0000000006", "1000000"),
+        woo(7, "0000000007", "", kind="variable"),       # قیمت روی حالت‌هاست
     ]
     return build_plan(products=products, isaco=lst, haseb={}, price_rules=RULES,
                       stock_rules=StockRules(), update_price=True, update_stock=False)
@@ -87,7 +89,7 @@ def test_row_kind_classification():
     from nabz.ui.tabs.sync import row_kind
     kinds = {i.product_id: row_kind(i) for i in make_plan().items}
     assert kinds == {1: "change", 2: "same", 3: "no_isaco", 4: "other",
-                     5: "other", 6: "review"}
+                     5: "change", 6: "review", 7: "other"}
 
 
 @pytest.fixture
@@ -105,14 +107,14 @@ def visible_ids(tab):
 
 class TestFullList:
     def test_all_site_products_are_listed(self, tab):
-        assert tab.table.rowCount() == 6
-        assert "۶ محصول سایت بررسی شد" in tab.status.text()
+        assert tab.table.rowCount() == 7
+        assert "۷ محصول سایت بررسی شد" in tab.status.text()
 
     def test_default_filter_shows_changes_and_counts(self, tab):
         assert tab.current_kind() == "change"
-        assert visible_ids(tab) == [1, 6]
+        assert visible_ids(tab) == [1, 5, 6]
         assert "(۱)" in tab.kind_buttons["same"].text()
-        assert "(۶)" in tab.kind_buttons["all"].text()
+        assert "(۷)" in tab.kind_buttons["all"].text()
 
     def test_filters(self, tab):
         tab.kind_buttons["same"].setChecked(True)
@@ -120,7 +122,7 @@ class TestFullList:
         tab.kind_buttons["no_isaco"].setChecked(True)
         assert visible_ids(tab) == [3]
         tab.kind_buttons["all"].setChecked(True)
-        assert visible_ids(tab) == [1, 2, 3, 4, 5, 6]
+        assert visible_ids(tab) == [1, 2, 3, 4, 5, 6, 7]
         tab.search.setText("محصول 2")
         assert visible_ids(tab) == [2]
 
@@ -130,7 +132,9 @@ class TestFullList:
         assert "بدون تغییر" in texts[2]
         assert "تغییر قیمت" in texts[1]
         assert "ایساکو نیست" in texts[3]
-        assert "کد" in texts[4] and "خالی" in texts[5]
+        assert "کد" in texts[4]
+        assert "قیمت‌گذاری" in texts[5] and "نداشت" in texts[5]
+        assert "متغیر" in texts[7]
         assert "بررسی" in texts[6]
 
     def test_no_changes_shows_whole_list(self, qapp, db, store):
@@ -143,9 +147,12 @@ class TestFullList:
         assert not t.apply_btn.isEnabled()
 
     def test_apply_buttons_only_on_actionable_rows(self, tab):
-        with_button = sorted(tab._row_items[r].product_id for r in range(tab.table.rowCount())
-                             if tab.table.cellWidget(r, tab.COL_APPLY) is not None)
-        assert with_button == [1, 6]
+        def ids(word):
+            return sorted(tab._row_items[r].product_id for r in range(tab.table.rowCount())
+                          if (w := tab.table.cellWidget(r, tab.COL_APPLY)) is not None
+                          and word in w.text())
+        assert ids("اعمال") == [1, 5, 6]
+        assert ids("تطبیق") == [3]          # «در ایساکو نیست» → دکمهٔ تطبیق
 
 
 class TestApplySafety:
@@ -154,19 +161,34 @@ class TestApplySafety:
         return sorted(u["id"] for u in updates)
 
     def test_apply_all_sends_only_real_changes(self, tab):
-        # بدون تغییر، قیمت خالیِ سایت، بدون کد و «در ایساکو نیست» ارسال نمی‌شوند
-        assert self.ids_to_apply(tab) == [1, 6]
+        # بدون تغییر، محصول متغیر، بدون کد و «در ایساکو نیست» ارسال نمی‌شوند؛
+        # محصول ساده‌ای که روی سایت قیمت نداشت قیمت می‌گیرد
+        assert self.ids_to_apply(tab) == [1, 5, 6]
 
     def test_filter_does_not_change_what_is_applied(self, tab):
         tab.kind_buttons["same"].setChecked(True)
-        assert self.ids_to_apply(tab) == [1, 6]
+        assert self.ids_to_apply(tab) == [1, 5, 6]
 
     def test_manual_edit_of_unchanged_row_is_applied(self, tab):
         r = next(r for r, i in enumerate(tab._row_items) if i.product_id == 2)
         tab.table.item(r, tab.COL_NEW_PRICE).setText("1234000")
         assert "ویرایش دستی" in tab.table.item(r, tab.COL_STATUS).text()
         assert tab.table.cellWidget(r, tab.COL_APPLY) is not None
-        assert self.ids_to_apply(tab) == [1, 2, 6]
+        assert self.ids_to_apply(tab) == [1, 2, 5, 6]
+
+    def test_empty_price_rollback_clears_price_again(self, tab):
+        r = next(r for r, i in enumerate(tab._row_items) if i.product_id == 5)
+        updates, snaps = tab._collect_rows([r])
+        assert updates[0]["regular_price"]
+        assert snaps[0].old_price == ""
+        assert snaps[0].to_woo_revert()["regular_price"] == ""      # دوباره خالی
+
+    def test_stock_only_change_never_clears_price_on_rollback(self, tab):
+        r = next(r for r, i in enumerate(tab._row_items) if i.product_id == 2)
+        tab.table.item(r, tab.COL_NEW_STOCK).setText("5")
+        _, snaps = tab._collect_rows([r])
+        # قیمت قبلی (همان مقدار) برمی‌گردد، هرگز خالی نمی‌شود
+        assert snaps[0].to_woo_revert().get("regular_price") == "2200000"
 
 
 class TestClearHistory:

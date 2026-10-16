@@ -55,14 +55,36 @@ class SyncItem:
 
     isaco: IsacoItem | None = None
     haseb: HasebItem | None = None
+    product_type: str = "simple"
+    #: اگر قیمت از «تطبیق تأییدشده» آمده، کد ایساکوی استفاده‌شده
+    mapped_code: str = ""
+    #: نام پیشنهادی از حاسب (فقط وقتی «مقایسهٔ نام» روشن است و نام فرق دارد)
+    new_name: str | None = None
+
+    @property
+    def name_changes(self) -> bool:
+        return bool(self.new_name) and self.new_name != self.name
+
+    @property
+    def fills_empty_price(self) -> bool:
+        """محصول ساده روی سایت قیمت ندارد ولی ایساکو قیمت دارد → قیمت‌گذاری.
+
+        محصول متغیر (چندحالته) کنار گذاشته می‌شود؛ قیمتش روی تک‌تک حالت‌هاست.
+        """
+        return (
+            self.current_price is None
+            and bool(self.new_price)
+            and self.product_type == "simple"
+            and self.match is not MatchStatus.NO_SKU
+        )
 
     @property
     def price_changes(self) -> bool:
-        return (
-            self.new_price is not None
-            and self.current_price is not None
-            and self.new_price != self.current_price
-        )
+        if self.new_price is None:
+            return False
+        if self.current_price is None:
+            return self.fills_empty_price
+        return self.new_price != self.current_price
 
     @property
     def stock_changes(self) -> bool:
@@ -74,7 +96,7 @@ class SyncItem:
 
     @property
     def changes(self) -> bool:
-        return self.price_changes or self.stock_changes
+        return self.price_changes or self.stock_changes or self.name_changes
 
     @property
     def needs_review(self) -> bool:
@@ -82,7 +104,8 @@ class SyncItem:
         return self.price_result is not None and self.price_result.needs_review
 
     def to_woo_update(
-        self, *, include_price: bool = True, include_stock: bool = True
+        self, *, include_price: bool = True, include_stock: bool = True,
+        include_name: bool = False,
     ) -> dict | None:
         """این ردیف را به شکل قابل‌فهم برای ``products/batch`` درمی‌آورد.
 
@@ -98,6 +121,8 @@ class SyncItem:
             payload["manage_stock"] = True
             payload["stock_quantity"] = self.new_stock
             payload["stock_status"] = self.stock_result.status.value
+        if include_name and self.name_changes:
+            payload["name"] = self.new_name
         return payload if len(payload) > 1 else None
 
 
@@ -125,6 +150,7 @@ class SyncPlan:
             "matched": len(self.matched()),
             "price_changes": sum(1 for i in self.items if i.price_changes),
             "stock_changes": sum(1 for i in self.items if i.stock_changes),
+            "name_changes": sum(1 for i in self.items if i.name_changes),
             "changes": len(self.with_changes()),
             "needs_review": len(self.needing_review()),
             "no_isaco_price": sum(
@@ -149,6 +175,24 @@ class SyncPlan:
         return updates
 
 
+def _name_from_haseb(site_name: str, haseb_item, clean) -> str | None:
+    """نام حاسب اگر واقعاً با نام سایت فرق دارد (ي/ك عربی و فاصله‌ها حساب نیست).
+
+    >>> from nabz.new_products import clean_title
+    >>> class H: name = "سپر  عقب پژو ي"
+    >>> _name_from_haseb("سپر عقب پژو ی", H, clean_title) is None
+    True
+    >>> _name_from_haseb("سپر", H, clean_title)
+    'سپر عقب پژو ی'
+    """
+    if haseb_item is None:
+        return None
+    new = clean(haseb_item.name)
+    if not new or new == clean(site_name):
+        return None
+    return new
+
+
 def build_plan(
     products: list[WooProduct],
     isaco: dict[str, IsacoItem],
@@ -158,6 +202,8 @@ def build_plan(
     *,
     update_price: bool = True,
     update_stock: bool = True,
+    code_map: dict[str, str] | None = None,
+    compare_names: bool = False,
 ) -> SyncPlan:
     """برنامهٔ سینک را از سه منبع می‌سازد.
 
@@ -166,7 +212,13 @@ def build_plan(
     :param haseb: موجودی حاسب، «کد نرمال‌شده → کالا».
     :param update_price: اگر خاموش باشد فقط موجودی سینک می‌شود.
     :param update_stock: اگر خاموش باشد فقط قیمت سینک می‌شود.
+    :param code_map: تطبیق‌های تأییدشده «کد سایت → کد ایساکو» (وقتی ایساکو
+        کد را عوض/کوتاه کرده). کد دقیق همیشه اولویت دارد.
     """
+    from .codematch import resolve
+    from .new_products import clean_title
+
+    code_map = code_map or {}
     plan = SyncPlan()
 
     for product in products:
@@ -185,7 +237,7 @@ def build_plan(
             )
             continue
 
-        isaco_item = isaco.get(sku)
+        isaco_item, mapped_code = resolve(sku, isaco, code_map)
         haseb_item = haseb.get(sku)
 
         # --- قیمت ---
@@ -231,6 +283,10 @@ def build_plan(
                 stock_result=stock_result,
                 isaco=isaco_item,
                 haseb=haseb_item,
+                product_type=product.type or "simple",
+                mapped_code=mapped_code,
+                new_name=_name_from_haseb(product.name, haseb_item, clean_title)
+                if compare_names else None,
             )
         )
 

@@ -36,7 +36,9 @@ def _plan_to_snapshots(plan: SyncPlan, applied_ids: set[int]) -> list[Snapshot]:
             Snapshot(
                 product_id=item.product_id,
                 sku=item.sku,
-                old_price=str(item.current_price) if item.current_price is not None else None,
+                # "" یعنی «روی سایت خالی بود»؛ بازگرداندن قیمت را دوباره خالی می‌کند
+                old_price=(str(item.current_price) if item.current_price is not None
+                           else ("" if item.fills_empty_price else None)),
                 new_price=str(item.new_price) if item.new_price is not None else None,
                 old_stock=item.current_stock,
                 new_stock=item.new_stock,

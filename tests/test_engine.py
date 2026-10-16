@@ -212,3 +212,40 @@ class TestSummary:
         updates = plan.to_woo_updates()
         assert len(updates) == 1
         assert updates[0]["id"] == 1
+
+
+class TestEmptySitePrice:
+    """۱۳۰ محصول روی سایت قیمت نداشتند و ایساکو قیمت داشت؛ هرگز پر نمی‌شدند."""
+
+    def _plan(self, kind="simple"):
+        from decimal import Decimal
+
+        from nabz.engine import build_plan
+        from nabz.pricing import PriceRules
+        from nabz.sources.isaco_excel import IsacoItem
+        from nabz.stock import StockRules
+        from nabz.targets.woocommerce import WooProduct
+        product = WooProduct(id=1, name="x", sku="1230200599", regular_price="",
+                             stock_quantity=1, stock_status="instock",
+                             manage_stock=True, type=kind, status="publish")
+        lst = {"1230200599": IsacoItem("1230200599", "x", "", "عدد", 1,
+                                       retail=12_000_000, vat=13_600_000,
+                                       wholesale=11_000_000)}
+        return build_plan(products=[product], isaco=lst, haseb={},
+                          price_rules=PriceRules(markup_percent=Decimal("0")),
+                          stock_rules=StockRules(), update_stock=False)
+
+    def test_simple_product_gets_price(self):
+        plan = self._plan()
+        (item,) = plan.items
+        assert item.fills_empty_price and item.price_changes
+        assert plan.to_woo_updates()[0]["regular_price"] == "1360000"
+
+    def test_variable_product_untouched(self):
+        plan = self._plan("variable")
+        assert plan.to_woo_updates() == []
+
+    def test_auto_sync_snapshot_restores_empty(self):
+        from nabz.runner import _plan_to_snapshots
+        (snap,) = _plan_to_snapshots(self._plan(), {1})
+        assert snap.old_price == "" and snap.to_woo_revert()["regular_price"] == ""
